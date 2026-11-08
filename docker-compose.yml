@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  nasa-harmonization-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nasa_modis_viirs_api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:////app/data/nasa_observations.db
+      - DEFAULT_SPATIAL_BANDWIDTH_KM=2.5
+      - DEFAULT_TEMPORAL_BANDWIDTH_HOURS=6.0
+      - DEFAULT_MIN_CLUSTER_SIZE=3
+      - DEFAULT_CLUSTER_EPSILON=0.5
+      - DEBUG=False
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+

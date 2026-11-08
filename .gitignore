@@ -1,0 +1,7 @@
+# Python environments
+venv/
+env/
+__pycache__/
+
+# Environment variables (Critical: keeps your API key safe)
+.env
