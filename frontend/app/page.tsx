@@ -7,6 +7,7 @@ import MapWrapper from '@/components/MapWrapper';
 import TelemetryPanel from '@/components/TelemetryPanel';
 import ClusterDetailModal from '@/components/ClusterDetailModal';
 import Legend from '@/components/Legend';
+import BurningActivityCalendar from '@/components/BurningCalendar';
 import { BoundingBox, HarmonizedCluster, HarmonizationSummary, RawObservation } from '@/types/fire';
 import {
   fetchHarmonizedData,
@@ -17,6 +18,9 @@ import {
 } from '@/utils/api';
 
 export default function DisasterResponseDashboard() {
+  // Navigation View State: 'map' | 'calendar'
+  const [currentView, setCurrentView] = useState<'map' | 'calendar'>('map');
+
   // Primary Bounding Box state (Default: Sierra Nevada / Central California)
   const [bbox, setBbox] = useState<BoundingBox>(PRESET_REGIONS[0].bbox);
 
@@ -112,67 +116,78 @@ export default function DisasterResponseDashboard() {
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#090D16]">
       {/* Top Banner Navigation */}
-      <Header backendHealthy={backendHealthy} totalDbRecords={totalDbRecords} />
+      <Header
+        backendHealthy={backendHealthy}
+        totalDbRecords={totalDbRecords}
+        currentView={currentView}
+        onViewChange={setCurrentView}
+      />
 
-      {/* Main Workspace (3-column layout: Control Panel | Interactive Map | Telemetry Feed) */}
-      <main className="flex-1 flex overflow-hidden relative">
-        {/* Left Side: Tactical Control Panel */}
-        <ControlPanel
-          bbox={bbox}
-          onBboxChange={handleBoundsChange}
-          onHarmonize={executeHarmonization}
-          onExportCsv={handleExportCsv}
-          loading={loading}
-          exporting={exporting}
-          showPerimeters={showPerimeters}
-          setShowPerimeters={setShowPerimeters}
-          showRawObservations={showRawObservations}
-          setShowRawObservations={setShowRawObservations}
-          showNoisePoints={showNoisePoints}
-          setShowNoisePoints={setShowNoisePoints}
-        />
-
-        {/* Center: Dynamic Geospatial Map */}
-        <div className="flex-1 relative h-full">
-          {errorNotice && (
-            <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[1500] px-4 py-2 bg-rose-950/90 border border-rose-500 text-rose-200 text-xs rounded-lg backdrop-blur-md shadow-2xl flex items-center gap-3">
-              <span>⚠️ {errorNotice}</span>
-              <button
-                onClick={() => setErrorNotice(null)}
-                className="text-xs text-rose-400 hover:text-white underline font-semibold"
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
-
-          <MapWrapper
+      {/* Main Workspace Toggle: Map vs Burning Activity Calendar */}
+      {currentView === 'map' ? (
+        <main className="flex-1 flex overflow-hidden relative">
+          {/* Left Side: Tactical Control Panel */}
+          <ControlPanel
             bbox={bbox}
-            clusters={clusters}
-            noisePoints={noisePoints}
-            selectedClusterId={selectedCluster?.cluster_id ?? null}
-            onSelectCluster={(cluster) => setSelectedCluster(cluster)}
-            onBoundsChange={handleBoundsChange}
+            onBboxChange={handleBoundsChange}
+            onHarmonize={executeHarmonization}
+            onExportCsv={handleExportCsv}
+            loading={loading}
+            exporting={exporting}
             showPerimeters={showPerimeters}
+            setShowPerimeters={setShowPerimeters}
             showRawObservations={showRawObservations}
+            setShowRawObservations={setShowRawObservations}
             showNoisePoints={showNoisePoints}
+            setShowNoisePoints={setShowNoisePoints}
           />
 
-          <Legend />
-        </div>
+          {/* Center: Dynamic Geospatial Map */}
+          <div className="flex-1 relative h-full">
+            {errorNotice && (
+              <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[1500] px-4 py-2 bg-rose-950/90 border border-rose-500 text-rose-200 text-xs rounded-lg backdrop-blur-md shadow-2xl flex items-center gap-3">
+                <span>⚠️ {errorNotice}</span>
+                <button
+                  onClick={() => setErrorNotice(null)}
+                  className="text-xs text-rose-400 hover:text-white underline font-semibold"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
 
-        {/* Right Side: Incident Telemetry Feed & Summary Cards */}
-        <TelemetryPanel
-          summary={summary}
-          clusters={clusters}
-          selectedClusterId={selectedCluster?.cluster_id ?? null}
-          onSelectCluster={(cluster) => setSelectedCluster(cluster)}
-          loading={loading}
-        />
-      </main>
+            <MapWrapper
+              bbox={bbox}
+              clusters={clusters}
+              noisePoints={noisePoints}
+              selectedClusterId={selectedCluster?.cluster_id ?? null}
+              onSelectCluster={(cluster) => setSelectedCluster(cluster)}
+              onBoundsChange={handleBoundsChange}
+              showPerimeters={showPerimeters}
+              showRawObservations={showRawObservations}
+              showNoisePoints={showNoisePoints}
+            />
+
+            <Legend />
+          </div>
+
+          {/* Right Side: Incident Telemetry Feed & Summary Cards */}
+          <TelemetryPanel
+            summary={summary}
+            clusters={clusters}
+            selectedClusterId={selectedCluster?.cluster_id ?? null}
+            onSelectCluster={(cluster) => setSelectedCluster(cluster)}
+            loading={loading}
+          />
+        </main>
+      ) : (
+        <main className="flex-1 overflow-hidden relative">
+          <BurningActivityCalendar />
+        </main>
+      )}
 
       {/* Incident Deep Intelligence Inspector Modal */}
-      {selectedCluster && (
+      {selectedCluster && currentView === 'map' && (
         <ClusterDetailModal
           cluster={selectedCluster}
           onClose={() => setSelectedCluster(null)}

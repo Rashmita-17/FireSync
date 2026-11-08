@@ -1,14 +1,21 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Satellite, Radio, Flame, ShieldAlert, Clock, ExternalLink } from 'lucide-react';
+import { Satellite, Flame, Clock, ExternalLink, Map, Calendar } from 'lucide-react';
 
 interface HeaderProps {
   backendHealthy: boolean;
   totalDbRecords: number;
+  currentView: 'map' | 'calendar';
+  onViewChange: (view: 'map' | 'calendar') => void;
 }
 
-export default function Header({ backendHealthy, totalDbRecords }: HeaderProps) {
+export default function Header({
+  backendHealthy,
+  totalDbRecords,
+  currentView,
+  onViewChange,
+}: HeaderProps) {
   const [utcTime, setUtcTime] = useState<string>('');
 
   useEffect(() => {
@@ -43,18 +50,46 @@ export default function Header({ backendHealthy, totalDbRecords }: HeaderProps) 
         </div>
       </div>
 
-      {/* Center: Live Orbit Constellations & Clock */}
-      <div className="hidden lg:flex items-center gap-4">
-        {/* Constellations */}
-        <div className="flex items-center gap-2 px-2.5 py-1 bg-slate-900/80 rounded border border-slate-800 text-[11px]">
-          <Satellite className="w-3.5 h-3.5 text-purple-400" />
+      {/* Center: Tactical View Mode Switcher (Map vs Burning Activity Calendar) */}
+      <div className="flex items-center bg-slate-900/90 p-1 rounded-xl border border-slate-800 text-xs shadow-inner">
+        <button
+          onClick={() => onViewChange('map')}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition ${
+            currentView === 'map'
+              ? 'bg-rose-600 text-white shadow-glow-danger'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+          }`}
+          title="Interactive Map with Area of Interest bounding box selector & HDBSCAN clustering"
+        >
+          <Map className="w-3.5 h-3.5" />
+          <span>Incident Map</span>
+        </button>
+
+        <button
+          onClick={() => onViewChange('calendar')}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition ${
+            currentView === 'calendar'
+              ? 'bg-cyan-600 text-white shadow-glow-cyan'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+          }`}
+          title="Burning Activity Calendar (2000–2026), Accessible Color Ramps & Historical Anomaly Analytics"
+        >
+          <Calendar className="w-3.5 h-3.5" />
+          <span>Burning Calendar</span>
+        </button>
+      </div>
+
+      {/* Center Right: Live Orbit Constellations & Clock (Desktop) */}
+      <div className="hidden xl:flex items-center gap-3">
+        <div className="flex items-center gap-1.5 px-2 py-0.5 bg-slate-900/80 rounded border border-slate-800 text-[11px]">
+          <Satellite className="w-3 h-3 text-purple-400" />
           <span className="text-slate-400">MODIS:</span>
-          <span className="text-purple-300 font-mono font-medium">Terra / Aqua (1km)</span>
+          <span className="text-purple-300 font-mono">1km</span>
         </div>
-        <div className="flex items-center gap-2 px-2.5 py-1 bg-slate-900/80 rounded border border-slate-800 text-[11px]">
-          <Satellite className="w-3.5 h-3.5 text-cyan-400" />
+        <div className="flex items-center gap-1.5 px-2 py-0.5 bg-slate-900/80 rounded border border-slate-800 text-[11px]">
+          <Satellite className="w-3 h-3 text-cyan-400" />
           <span className="text-slate-400">VIIRS:</span>
-          <span className="text-cyan-300 font-mono font-medium">S-NPP / NOAA-20 (375m)</span>
+          <span className="text-cyan-300 font-mono">375m</span>
         </div>
 
         {/* Live Mission Clock */}
@@ -65,7 +100,7 @@ export default function Header({ backendHealthy, totalDbRecords }: HeaderProps) 
       </div>
 
       {/* Right: Backend Status & API Link */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2 sm:gap-3">
         <div className="flex items-center gap-2 px-2.5 py-1 bg-slate-900/80 rounded border border-slate-800 text-xs">
           <div className="relative flex items-center justify-center">
             <span
@@ -83,7 +118,7 @@ export default function Header({ backendHealthy, totalDbRecords }: HeaderProps) 
             {backendHealthy ? 'ONLINE' : 'CONNECTING...'}
           </span>
           {backendHealthy && (
-            <span className="text-[10px] text-slate-500 font-mono">
+            <span className="text-[10px] text-slate-500 font-mono hidden md:inline">
               ({totalDbRecords.toLocaleString()} recs)
             </span>
           )}
