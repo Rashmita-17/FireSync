@@ -1,6 +1,7 @@
 version: "3.8"
 
 services:
+  # FastAPI Spatio-Temporal Harmonization Engine
   nasa-harmonization-api:
     build:
       context: .
@@ -19,3 +20,16 @@ services:
       - ./data:/app/data
     restart: unless-stopped
 
+  # Next.js & Tailwind Disaster Response Dashboard
+  nasa-disaster-dashboard:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: nasa_disaster_dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - nasa-harmonization-api
+    restart: unless-stopped

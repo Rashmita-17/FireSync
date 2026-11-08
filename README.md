@@ -1,12 +1,16 @@
 # NASA Space Apps Challenge: Harmonization of MODIS and VIIRS
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![Next.js](https://img.shields.io/badge/Next.js-14.2%20App%20Router-000000.svg?logo=next.js&logoColor=white)](https://nextjs.org/)
+[![Tailwind CSS](https://img.shields.io/badge/Tailwind%20CSS-3.4+-06B6D4.svg?logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
+[![Leaflet](https://img.shields.io/badge/Leaflet-1.9.4-199900.svg?logo=leaflet&logoColor=white)](https://leafletjs.com)
 [![Scikit-Learn](https://img.shields.io/badge/Scikit--Learn-HDBSCAN-F7931E.svg?logo=scikit-learn&logoColor=white)](https://scikit-learn.org)
 [![Pandas](https://img.shields.io/badge/Pandas-2.2+-150458.svg?logo=pandas&logoColor=white)](https://pandas.pydata.org)
 [![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0+-D71F00.svg?logo=sqlalchemy&logoColor=white)](https://www.sqlalchemy.org)
 
-Production-grade Python **FastAPI** backend engineered for the **NASA International Space Apps Challenge ("Harmonization of MODIS and VIIRS")**.
+Full-stack production platform engineered for the **NASA International Space Apps Challenge ("Harmonization of MODIS and VIIRS")**:
+- **Python FastAPI Backend**: Spatio-temporal HDBSCAN harmonization, resolution de-biasing, chunked Pandas ingestion, and streamed scientific CSV exports.
+- **Next.js & Tailwind CSS Frontend**: Dark-themed mission control dashboard for **emergency responders** and **land managers** with interactive Leaflet bounding-box drawing, live incident telemetry feeds, and deep intelligence inspector modals.
 
 ---
 
@@ -215,44 +219,61 @@ Uploads NASA FIRMS archive CSV files (either MODIS `fire_archive_M-C61_*.csv` or
 
 ---
 
-## 4. Quickstart & Installation
+## 4. Disaster Response Dashboard (Next.js & Tailwind CSS)
 
-### Option A: Local Python Environment
+Located in `frontend/`, the web dashboard is purpose-built for **Emergency Incident Commanders**, **Wildland Firefighters**, and **Land Resource Managers**:
 
-1. **Install Dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. **Generate Synthetic NASA FIRMS Dataset & Seed Database**:
-   ```bash
-   python scripts/seed_db.py
-   ```
-   *Generates realistic coincident MODIS (Aqua/Terra) and VIIRS (S-NPP/NOAA-20) wildfire complexes with a ~4.8x VIIRS fragmentation ratio and isolated noise points.*
-
-3. **Start the FastAPI Backend**:
-   ```bash
-   uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-   ```
-   Navigate to `http://localhost:8000/docs` to test endpoints interactively.
-
-4. **Run the Test Suite**:
-   ```bash
-   python -m pytest -v
-   ```
+- **Tactical Dark Mission Control UI**: High-contrast dark theme (`#090D16`), glowing thermal alert beacons, and live UTC mission clocks.
+- **Interactive Leaflet Canvas**:
+  - **Click-and-Drag Area of Interest (AOI)**: Hit **"Draw AOI Box"** and drag across the map to dynamically extract bounding box coordinates and harmonize the enclosed zone.
+  - **Manual Coordinates Entry**: Input bounding coordinates (`min_lon`, `min_lat`, `max_lon`, `max_lat`) with automatic validation and smooth camera fly-to.
+  - **Quick Tactical Presets**: One-click jump to active sectors (e.g. *Sierra Nevada Complex*, *Cascade Range Front*, *Shasta-Klamath Ridge*, *Western Sector Overview*).
+- **Multi-Sensor Visualization**:
+  - **Harmonized FRP Beacons**: Pulsing radar rings color-coded by Fire Radiative Power (Extreme, High, Moderate, Low).
+  - **Multi-Sensor Cross-Validation Badges (`M+V`)**: Highlight events confirmed by both MODIS (1km) and VIIRS (375m).
+  - **Convex Hull Perimeters**: Semi-transparent tactical heat polygons showing physical fire front perimeters.
+  - **Raw Sub-Pixel Inspection**: Toggle raw MODIS 1km pixels (purple) vs VIIRS 375m sub-pixels (cyan) to inspect how the HDBSCAN algorithm resolved fragmentation.
+- **Real-Time Telemetry & Incident Intelligence**:
+  - **Summary Metrics**: Active complexes, spatial compression ratio, multi-sensor validation rate, and total cumulative radiative energy (MW).
+  - **Deep Intel Modal**: Click any incident to inspect duration, sensor contribution breakdown, and member satellite detections.
+  - **Streamed CSV Export**: One-click download directly from FastAPI `/api/export`.
 
 ---
 
-### Option B: Docker & Docker Compose
+## 5. Quickstart & Installation
+
+### Option A: Local Full-Stack Setup
+
+1. **Start the FastAPI Backend**:
+   ```bash
+   # Terminal 1
+   pip install -r requirements.txt
+   python scripts/seed_db.py
+   uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+   ```
+   *FastAPI documentation will be running at `http://localhost:8000/docs`.*
+
+2. **Start the Next.js Frontend Dashboard**:
+   ```bash
+   # Terminal 2
+   cd frontend
+   npm run dev
+   ```
+   *Open `http://localhost:3000` to access the Disaster Response Dashboard.*
+
+---
+
+### Option B: Docker Compose (Full Stack)
 
 ```bash
 docker-compose up --build
 ```
-The service will start on port `8000` with persistent storage mounted in `./data`.
+- **Disaster Response Dashboard**: `http://localhost:3000`
+- **FastAPI Harmonization Engine**: `http://localhost:8000`
 
 ---
 
-## 5. Verification Results
+## 6. Verification Results
 
 Running the automated test suite (`tests/`):
 ```

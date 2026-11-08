@@ -5,3 +5,4 @@ __pycache__/
 
 # Environment variables (Critical: keeps your API key safe)
 .env
+**/node_modules/
