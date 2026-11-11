@@ -1,7 +1,7 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import React from 'react';
+import React, { useMemo } from 'react';
 import { BoundingBox, HarmonizedCluster, RawObservation } from '@/types/fire';
 
 interface MapWrapperProps {
@@ -13,6 +13,7 @@ interface MapWrapperProps {
   onBoundsChange: (newBbox: BoundingBox) => void;
   showPerimeters: boolean;
   showRawObservations: boolean;
+  showSubPixels?: boolean;
   showNoisePoints: boolean;
 }
 
@@ -32,6 +33,31 @@ const DynamicMap = dynamic(() => import('@/components/Map'), {
 });
 
 export default function MapWrapper(props: MapWrapperProps) {
-  return <DynamicMap {...props} />;
+  const isSubPixels = props.showSubPixels !== undefined ? props.showSubPixels : props.showRawObservations;
+
+  // Force layer re-render: clone data with Object.assign to bypass PureComponent shallow equal comparison
+  const freshClusters = useMemo(
+    () => props.clusters.map((c) => Object.assign({}, c)),
+    [props.clusters]
+  );
+  const freshNoise = useMemo(
+    () => (props.noisePoints || []).map((n) => Object.assign({}, n)),
+    [props.noisePoints]
+  );
+
+  // Dynamic key prop combining data length and checkbox states (toggleState) to trigger re-renders
+  const toggleState = `${props.showPerimeters ? 'P1' : 'P0'}-${isSubPixels ? 'S1' : 'S0'}-${props.showNoisePoints ? 'N1' : 'N0'}`;
+  const dynamicKey = `map-canvas-${props.clusters.length}-${props.noisePoints?.length ?? 0}-${toggleState}-${props.selectedClusterId ?? 'null'}`;
+
+  return (
+    <DynamicMap
+      key={dynamicKey}
+      {...props}
+      clusters={freshClusters}
+      noisePoints={freshNoise}
+      showRawObservations={isSubPixels}
+      showSubPixels={isSubPixels}
+    />
+  );
 }
 

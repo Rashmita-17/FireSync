@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { BoundingBox, HarmonizedCluster, RawObservation } from '@/types/fire';
+import { normalizeBoundingBox, wrapLongitude } from '@/utils/api';
 import { Layers, Maximize2, Crosshair, AlertTriangle, Flame, Radio } from 'lucide-react';
 
 interface MapProps {
@@ -15,6 +16,7 @@ interface MapProps {
   onBoundsChange: (newBbox: BoundingBox) => void;
   showPerimeters: boolean;
   showRawObservations: boolean;
+  showSubPixels?: boolean;
   showNoisePoints: boolean;
 }
 
@@ -27,8 +29,13 @@ export default function DisasterMap({
   onBoundsChange,
   showPerimeters,
   showRawObservations,
+  showSubPixels,
   showNoisePoints,
 }: MapProps) {
+  // Normalize layout visibility properties
+  const isSubPixelsVisible = showSubPixels !== undefined ? showSubPixels : showRawObservations;
+  const isPerimetersVisible = showPerimeters;
+  const isNoiseVisible = showNoisePoints;
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
   const bboxRectangleRef = useRef<L.Rectangle | null>(null);
@@ -40,8 +47,87 @@ export default function DisasterMap({
   const [isDrawing, setIsDrawing] = useState(false);
   const drawStartLatLngRef = useRef<L.LatLng | null>(null);
   const drawTempRectRef = useRef<L.Rectangle | null>(null);
-  const [mapTileTheme, setMapTileTheme] = useState<'dark' | 'satellite'>('dark');
-  const tileLayerRef = useRef<L.TileLayer | null>(null);
+  const [mapTileTheme, setMapTileTheme] = useState<'dark' | 'satellite' | 'streets'>('dark');
+  const tileLayerGroupRef = useRef<L.LayerGroup | null>(null);
+
+  // Mapbox token check (if present, use high-resolution Mapbox tiles; otherwise use 100% free ESRI/OSM with zero watermarks)
+  const mapboxToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN?.trim();
+
+  // Helper: Factory for pristine, watermark-free basemap tile layers
+  const createBasemapLayerGroup = useCallback(
+    (theme: 'dark' | 'satellite' | 'streets'): L.LayerGroup => {
+      const group = L.layerGroup();
+      const hasMapbox = Boolean(mapboxToken && mapboxToken.startsWith('pk.'));
+
+      if (theme === 'dark') {
+        if (hasMapbox) {
+          // Mapbox Dark v11 (High-resolution rasterized vector tiles)
+          const mbDark = L.tileLayer(
+            `https://api.mapbox.com/styles/v1/mapbox/dark-v11/tiles/{z}/{x}/{y}?access_token=${mapboxToken}`,
+            {
+              tileSize: 512,
+              zoomOffset: -1,
+              maxZoom: 19,
+              attribution: '© Mapbox © OpenStreetMap',
+            }
+          );
+          group.addLayer(mbDark);
+        } else {
+          // ESRI World Dark Gray Canvas: 100% Free, NO API key required, NO watermark
+          const esriDark = L.tileLayer(
+            'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+            {
+              maxZoom: 16,
+              attribution: 'Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ',
+            }
+          );
+          const esriLabels = L.tileLayer(
+            'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
+            {
+              maxZoom: 16,
+            }
+          );
+          group.addLayer(esriDark);
+          group.addLayer(esriLabels);
+        }
+      } else if (theme === 'satellite') {
+        if (hasMapbox) {
+          // Mapbox Satellite Streets
+          const mbSat = L.tileLayer(
+            `https://api.mapbox.com/styles/v1/mapbox/satellite-streets-v12/tiles/{z}/{x}/{y}?access_token=${mapboxToken}`,
+            {
+              tileSize: 512,
+              zoomOffset: -1,
+              maxZoom: 19,
+              attribution: '© Mapbox © Maxar',
+            }
+          );
+          group.addLayer(mbSat);
+        } else {
+          // ESRI World Imagery: 100% Free, NO API key required, NO watermark
+          const esriSat = L.tileLayer(
+            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            {
+              maxZoom: 18,
+              attribution:
+                'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
+            }
+          );
+          group.addLayer(esriSat);
+        }
+      } else {
+        // Standard OpenStreetMap: 100% Free, NO API key required
+        const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 19,
+          attribution: '&copy; OpenStreetMap contributors',
+        });
+        group.addLayer(osm);
+      }
+
+      return group;
+    },
+    [mapboxToken]
+  );
 
   // Helper: determine marker color from FRP
   const getFrpColor = (frp: number) => {
@@ -77,16 +163,10 @@ export default function DisasterMap({
       attributionControl: false,
     });
 
-    // Dark CartoDB tile layer
-    const darkTiles = L.tileLayer(
-      'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-      {
-        maxZoom: 19,
-        subdomains: 'abcd',
-      }
-    ).addTo(map);
-
-    tileLayerRef.current = darkTiles;
+    // Mount initial basemap layer group
+    const initialTiles = createBasemapLayerGroup(mapTileTheme);
+    initialTiles.addTo(map);
+    tileLayerGroupRef.current = initialTiles;
 
     // Tactical Zoom Control top-right
     L.control.zoom({ position: 'topright' }).addTo(map);
@@ -113,23 +193,14 @@ export default function DisasterMap({
     const map = mapInstanceRef.current;
     if (!map) return;
 
-    if (tileLayerRef.current) {
-      map.removeLayer(tileLayerRef.current);
+    if (tileLayerGroupRef.current) {
+      map.removeLayer(tileLayerGroupRef.current);
     }
 
-    if (mapTileTheme === 'dark') {
-      tileLayerRef.current = L.tileLayer(
-        'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-        { maxZoom: 19, subdomains: 'abcd' }
-      ).addTo(map);
-    } else {
-      // ESRI World Imagery (Satellite)
-      tileLayerRef.current = L.tileLayer(
-        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-        { maxZoom: 18 }
-      ).addTo(map);
-    }
-  }, [mapTileTheme]);
+    const newGroup = createBasemapLayerGroup(mapTileTheme);
+    newGroup.addTo(map);
+    tileLayerGroupRef.current = newGroup;
+  }, [mapTileTheme, createBasemapLayerGroup]);
 
   // 3. Render Query Bounding Box Rectangle
   useEffect(() => {
@@ -159,9 +230,24 @@ export default function DisasterMap({
 
   // 4. Render Harmonized Clusters & Perimeters
   useEffect(() => {
-    const clustersGroup = clustersLayerRef.current;
-    const perimetersGroup = perimetersLayerRef.current;
-    if (!clustersGroup || !perimetersGroup) return;
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    let clustersGroup = clustersLayerRef.current;
+    if (!clustersGroup) {
+      clustersGroup = L.layerGroup().addTo(map);
+      clustersLayerRef.current = clustersGroup;
+    } else if (!map.hasLayer(clustersGroup)) {
+      clustersGroup.addTo(map);
+    }
+
+    let perimetersGroup = perimetersLayerRef.current;
+    if (!perimetersGroup) {
+      perimetersGroup = L.layerGroup().addTo(map);
+      perimetersLayerRef.current = perimetersGroup;
+    } else if (!map.hasLayer(perimetersGroup)) {
+      perimetersGroup.addTo(map);
+    }
 
     clustersGroup.clearLayers();
     perimetersGroup.clearLayers();
@@ -170,23 +256,39 @@ export default function DisasterMap({
       const isSelected = selectedClusterId === cluster.cluster_id;
       const frpColor = getFrpColor(cluster.total_frp);
 
-      // Render Convex Hull / Footprint Perimeter if enabled
-      if (showPerimeters && cluster.geojson_geometry.type === 'Polygon') {
-        const polyCoords = cluster.geojson_geometry.coordinates[0].map(
-          (pt: [number, number]) => [pt[1], pt[0]] as [number, number]
-        );
+      // Render Convex Hull / Footprint Perimeter if layout visibility is 'visible'
+      if (isPerimetersVisible) {
+        if (cluster.geojson_geometry && cluster.geojson_geometry.type === 'Polygon') {
+          const polyCoords = cluster.geojson_geometry.coordinates[0].map(
+            (pt: [number, number]) => [pt[1], pt[0]] as [number, number]
+          );
 
-        const polygon = L.polygon(polyCoords, {
-          color: frpColor,
-          weight: isSelected ? 3 : 1.5,
-          opacity: 0.85,
-          fillColor: frpColor,
-          fillOpacity: isSelected ? 0.35 : 0.18,
-          dashArray: isSelected ? undefined : '4, 4',
-        });
+          const polygon = L.polygon(polyCoords, {
+            color: frpColor,
+            weight: isSelected ? 3 : 1.5,
+            opacity: 0.85,
+            fillColor: frpColor,
+            fillOpacity: isSelected ? 0.35 : 0.18,
+            dashArray: isSelected ? undefined : '4, 4',
+          });
 
-        polygon.on('click', () => onSelectCluster(cluster));
-        perimetersGroup.addLayer(polygon);
+          polygon.on('click', () => onSelectCluster(cluster));
+          perimetersGroup.addLayer(polygon);
+        } else {
+          // Point / localized cluster perimeter footprint
+          const radiusMeters = Math.max(375, Math.sqrt((cluster.estimated_area_km2 || 1.0) / Math.PI) * 1000);
+          const circle = L.circle([cluster.centroid_lat, cluster.centroid_lon], {
+            radius: radiusMeters,
+            color: frpColor,
+            weight: isSelected ? 3 : 1.5,
+            opacity: 0.85,
+            fillColor: frpColor,
+            fillOpacity: isSelected ? 0.35 : 0.18,
+            dashArray: isSelected ? undefined : '4, 4',
+          });
+          circle.on('click', () => onSelectCluster(cluster));
+          perimetersGroup.addLayer(circle);
+        }
       }
 
       // Render Tactical FRP Beacon Marker (DivIcon)
@@ -216,7 +318,10 @@ export default function DisasterMap({
         iconAnchor: [pulseSize / 2, pulseSize / 2],
       });
 
-      const marker = L.marker([cluster.weighted_centroid_lat, cluster.weighted_centroid_lon], {
+      const markerLat = cluster.weighted_centroid_lat ?? cluster.centroid_lat;
+      const markerLon = cluster.weighted_centroid_lon ?? cluster.centroid_lon;
+
+      const marker = L.marker([markerLat, markerLon], {
         icon: customIcon,
       });
 
@@ -225,11 +330,10 @@ export default function DisasterMap({
         <div class="p-2 min-w-[240px] text-slate-100 bg-slate-900 rounded-lg border border-slate-700 shadow-xl font-sans text-xs">
           <div class="flex items-center justify-between pb-1 mb-2 border-b border-slate-800">
             <span class="font-bold text-sm tracking-wide text-white">Event #${cluster.cluster_id}</span>
-            ${
-              cluster.cross_validated
-                ? '<span class="px-1.5 py-0.5 text-[10px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 rounded">M+V Cross-Validated</span>'
-                : '<span class="px-1.5 py-0.5 text-[10px] font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/40 rounded">Single Sensor</span>'
-            }
+            ${cluster.cross_validated
+          ? '<span class="px-1.5 py-0.5 text-[10px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 rounded">M+V Cross-Validated</span>'
+          : '<span class="px-1.5 py-0.5 text-[10px] font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/40 rounded">Single Sensor</span>'
+        }
           </div>
           <div class="space-y-1.5">
             <div class="flex justify-between">
@@ -270,30 +374,58 @@ export default function DisasterMap({
       marker.on('click', () => onSelectCluster(cluster));
       clustersGroup.addLayer(marker);
     });
-  }, [clusters, selectedClusterId, showPerimeters, onSelectCluster]);
+  }, [clusters, selectedClusterId, isPerimetersVisible, onSelectCluster]);
 
   // 5. Render Raw Observations (MODIS vs VIIRS sub-pixels)
   useEffect(() => {
-    const rawObsGroup = rawObsLayerRef.current;
-    if (!rawObsGroup) return;
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    let rawObsGroup = rawObsLayerRef.current;
+    if (!rawObsGroup) {
+      rawObsGroup = L.layerGroup().addTo(map);
+      rawObsLayerRef.current = rawObsGroup;
+    } else if (!map.hasLayer(rawObsGroup)) {
+      rawObsGroup.addTo(map);
+    }
 
     rawObsGroup.clearLayers();
-    if (!showRawObservations) return;
+    if (!isSubPixelsVisible) return;
 
     clusters.forEach((cluster) => {
-      if (!cluster.observations) return;
+      const observations = cluster.observations && cluster.observations.length > 0
+        ? cluster.observations
+        : [
+          {
+            id: cluster.cluster_id,
+            latitude: cluster.weighted_centroid_lat,
+            longitude: cluster.weighted_centroid_lon,
+            acq_datetime: cluster.first_detected,
+            instrument: cluster.cross_validated ? 'MODIS+VIIRS' : (cluster.viirs_count > 0 ? 'VIIRS' : 'MODIS'),
+            satellite: cluster.cross_validated ? 'Multi-Sensor' : (cluster.viirs_count > 0 ? 'NOAA-20' : 'Aqua/Terra'),
+            confidence: cluster.harmonized_confidence,
+            confidence_raw: 'high',
+            frp: cluster.total_frp,
+            brightness: null,
+            scan: 0.375,
+            track: 0.375,
+            daynight: 'D',
+            source_file: null,
+            created_at: cluster.first_detected,
+          }
+        ];
 
-      cluster.observations.forEach((obs) => {
+      observations.forEach((obs) => {
         const isModis = obs.instrument.toUpperCase().includes('MODIS');
-        const color = isModis ? '#A855F7' : '#06B6D4'; // Purple for MODIS, Cyan for VIIRS
-        const radius = isModis ? 6 : 3.5;
+        const color = isModis ? '#C084FC' : '#06B6D4'; // Purple for MODIS, Cyan for VIIRS
+        const radius = isModis ? 6 : 4;
 
         const circle = L.circleMarker([obs.latitude, obs.longitude], {
           radius,
-          color,
+          color: isModis ? '#E9D5FF' : '#67E8F9',
           fillColor: color,
-          fillOpacity: 0.6,
-          weight: 1,
+          fillOpacity: 0.85,
+          weight: 1.5,
         });
 
         circle.bindTooltip(
@@ -304,23 +436,35 @@ export default function DisasterMap({
         rawObsGroup.addLayer(circle);
       });
     });
-  }, [clusters, showRawObservations]);
+
+    rawObsGroup.eachLayer((layer: any) => {
+      if (layer.bringToFront) layer.bringToFront();
+    });
+  }, [clusters, isSubPixelsVisible]);
 
   // 6. Render Noise Points (Isolated False Alarms / Solar Glints)
   useEffect(() => {
-    const noiseGroup = noiseLayerRef.current;
-    if (!noiseGroup) return;
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    let noiseGroup = noiseLayerRef.current;
+    if (!noiseGroup) {
+      noiseGroup = L.layerGroup().addTo(map);
+      noiseLayerRef.current = noiseGroup;
+    } else if (!map.hasLayer(noiseGroup)) {
+      noiseGroup.addTo(map);
+    }
 
     noiseGroup.clearLayers();
-    if (!showNoisePoints || !noisePoints.length) return;
+    if (!isNoiseVisible || !noisePoints.length) return;
 
     noisePoints.forEach((obs) => {
       const circle = L.circleMarker([obs.latitude, obs.longitude], {
         radius: 4,
-        color: '#64748B', // Slate gray
-        fillColor: '#475569',
-        fillOpacity: 0.4,
-        weight: 1,
+        color: '#94A3B8',
+        fillColor: '#64748B',
+        fillOpacity: 0.6,
+        weight: 1.5,
         dashArray: '2, 2',
       });
 
@@ -331,7 +475,11 @@ export default function DisasterMap({
 
       noiseGroup.addLayer(circle);
     });
-  }, [noisePoints, showNoisePoints]);
+
+    noiseGroup.eachLayer((layer: any) => {
+      if (layer.bringToFront) layer.bringToFront();
+    });
+  }, [noisePoints, isNoiseVisible]);
 
   // 7. Interactive Area of Interest (AOI) Bounding Box Drawing Mode
   const startDrawingMode = useCallback(() => {
@@ -378,14 +526,16 @@ export default function DisasterMap({
         const west = bounds.getWest();
         const east = bounds.getEast();
 
-        // Ensure minimum sensible bounding box dimensions
-        if (Math.abs(north - south) > 0.05 && Math.abs(east - west) > 0.05) {
-          onBoundsChange({
-            min_lat: Number(south.toFixed(4)),
-            max_lat: Number(north.toFixed(4)),
-            min_lon: Number(west.toFixed(4)),
-            max_lon: Number(east.toFixed(4)),
-          });
+        // Ensure sensible bounding box dimensions (minimum ~500m)
+        if (Math.abs(north - south) > 0.005 && Math.abs(east - west) > 0.005) {
+          // Normalize coordinates and wrap longitudes into standard [-180, 180] range
+          const rawBox: BoundingBox = {
+            min_lat: south,
+            max_lat: north,
+            min_lon: west,
+            max_lon: east,
+          };
+          onBoundsChange(normalizeBoundingBox(rawBox));
         }
       }
 
@@ -417,76 +567,89 @@ export default function DisasterMap({
       {/* Map Container */}
       <div ref={mapContainerRef} className="w-full h-full z-0" />
 
-      {/* Floating Tactical Overlay Controls (Top-Left) */}
-      <div className="absolute top-4 left-4 z-[1000] flex flex-col gap-2">
-        <div className="flex items-center gap-1.5 p-1.5 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg shadow-2xl">
-          <button
-            onClick={startDrawingMode}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-all ${
-              isDrawing
-                ? 'bg-cyan-500 text-slate-950 shadow-glow-cyan font-semibold animate-pulse'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700'
-            }`}
-            title="Click and drag on map to define Area of Interest"
-          >
-            <Crosshair className="w-3.5 h-3.5" />
-            <span>{isDrawing ? 'Drawing AOI (Drag on Map)...' : 'Draw AOI Box'}</span>
-          </button>
-
-          <button
-            onClick={fitToQueryBounds}
-            className="flex items-center gap-1 px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded border border-slate-700 text-xs transition"
-            title="Fit view to current bounding box"
-          >
-            <Maximize2 className="w-3.5 h-3.5" />
-            <span>Reset View</span>
-          </button>
-
-          <div className="h-4 w-px bg-slate-800 mx-1" />
-
-          {/* Map Layer Style Switcher */}
-          <div className="flex bg-slate-800/80 p-0.5 rounded border border-slate-700/80 text-[11px]">
+      {/* Floating Tactical Overlay Controls (Unified Responsive Top Bar) */}
+      <div className="absolute top-4 left-4 right-16 z-[1000] flex flex-wrap items-center justify-between gap-4 pointer-events-none">
+        {/* Left Side: Drawing Tools & Basemap Switcher */}
+        <div className="flex flex-wrap items-center gap-2 pointer-events-auto">
+          <div className="flex items-center gap-1.5 p-1.5 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg shadow-2xl">
             <button
-              onClick={() => setMapTileTheme('dark')}
-              className={`px-2 py-1 rounded transition ${
-                mapTileTheme === 'dark' ? 'bg-cyan-600 text-white font-medium' : 'text-slate-400 hover:text-white'
-              }`}
+              onClick={startDrawingMode}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-all ${isDrawing
+                  ? 'bg-cyan-500 text-slate-950 shadow-glow-cyan font-semibold animate-pulse'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700'
+                }`}
+              title="Click and drag on map to define Area of Interest"
             >
-              Tactical Dark
+              <Crosshair className="w-3.5 h-3.5" />
+              <span>{isDrawing ? 'Drawing AOI (Drag on Map)...' : 'Draw AOI Box'}</span>
             </button>
+
             <button
-              onClick={() => setMapTileTheme('satellite')}
-              className={`px-2 py-1 rounded transition ${
-                mapTileTheme === 'satellite' ? 'bg-cyan-600 text-white font-medium' : 'text-slate-400 hover:text-white'
-              }`}
+              onClick={fitToQueryBounds}
+              className="flex items-center gap-1 px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded border border-slate-700 text-xs transition"
+              title="Fit view to current bounding box"
             >
-              Satellite
+              <Maximize2 className="w-3.5 h-3.5" />
+              <span>Reset</span>
             </button>
+
+            <div className="h-4 w-px bg-slate-800 mx-1" />
+
+            {/* Map Layer Style Switcher */}
+            <div className="flex bg-slate-800/80 p-0.5 rounded border border-slate-700/80 text-[11px]">
+              <button
+                onClick={() => setMapTileTheme('dark')}
+                className={`px-2 py-1 rounded transition ${mapTileTheme === 'dark' ? 'bg-cyan-600 text-white font-medium shadow-sm' : 'text-slate-400 hover:text-white'
+                  }`}
+                title="Tactical Dark Map (Mapbox Dark or ESRI Dark Gray Base)"
+              >
+                Dark
+              </button>
+              <button
+                onClick={() => setMapTileTheme('satellite')}
+                className={`px-2 py-1 rounded transition ${mapTileTheme === 'satellite' ? 'bg-cyan-600 text-white font-medium shadow-sm' : 'text-slate-400 hover:text-white'
+                  }`}
+                title="High-Resolution Satellite Imagery (ESRI / Mapbox)"
+              >
+                Sat
+              </button>
+              <button
+                onClick={() => setMapTileTheme('streets')}
+                className={`px-2 py-1 rounded transition ${mapTileTheme === 'streets' ? 'bg-cyan-600 text-white font-medium shadow-sm' : 'text-slate-400 hover:text-white'
+                  }`}
+                title="OpenStreetMap Standard Vector Streets"
+              >
+                Street
+              </button>
+            </div>
           </div>
+
+          {isDrawing && (
+            <div className="px-3 py-1.5 bg-cyan-950/90 border border-cyan-500/50 rounded-lg text-xs text-cyan-200 backdrop-blur-md shadow-lg flex items-center gap-2">
+              <Radio className="w-3.5 h-3.5 animate-pulse text-cyan-400" />
+              <span>Drag to define AOI bounding box</span>
+            </div>
+          )}
         </div>
 
-        {isDrawing && (
-          <div className="px-3 py-1.5 bg-cyan-950/90 border border-cyan-500/50 rounded-lg text-xs text-cyan-200 backdrop-blur-md shadow-lg flex items-center gap-2">
-            <Radio className="w-3.5 h-3.5 animate-pulse text-cyan-400" />
-            <span>Click and drag on the map to define bounding box</span>
+        {/* Right Side: Floating Status Pill (Separated, Never Overlapping Drawing Tools) */}
+        <div className="pointer-events-auto flex items-center gap-3 px-3 py-1.5 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg shadow-xl text-xs ml-auto">
+          <div className="flex items-center gap-1.5">
+            <Flame className="w-3.5 h-3.5 text-rose-500 animate-pulse" />
+            <span className="text-slate-300">
+              Harmonized: <strong className="text-white font-mono">{clusters.length}</strong>
+            </span>
           </div>
-        )}
-      </div>
-
-      {/* Floating Status Pill (Top Center) */}
-      <div className="absolute top-4 right-16 z-[1000] hidden md:flex items-center gap-3 px-3 py-1.5 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg shadow-xl text-xs">
-        <div className="flex items-center gap-1.5">
-          <Flame className="w-3.5 h-3.5 text-rose-500 animate-pulse" />
-          <span className="text-slate-300">
-            Harmonized Events: <strong className="text-white font-mono">{clusters.length}</strong>
-          </span>
-        </div>
-        <div className="h-3 w-px bg-slate-800" />
-        <div className="flex items-center gap-1.5">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          <span className="text-slate-300">
-            Cross-Validated: <strong className="text-emerald-400 font-mono">{clusters.filter((c) => c.cross_validated).length}</strong>
-          </span>
+          <div className="h-3 w-px bg-slate-800" />
+          <div className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-slate-300">
+              Cross-Validated:{' '}
+              <strong className="text-emerald-400 font-mono">
+                {clusters.filter((c) => c.cross_validated).length}
+              </strong>
+            </span>
+          </div>
         </div>
       </div>
     </div>

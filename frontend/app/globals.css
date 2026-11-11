@@ -57,6 +57,13 @@ body {
   color: #FFFFFF !important;
 }
 
+/* Tactical Fire Marker DivIcon transparency */
+.custom-fire-marker,
+.leaflet-div-icon {
+  background: transparent !important;
+  border: none !important;
+}
+
 /* Leaflet container dark background */
 .leaflet-container {
   background: #090D16 !important;

@@ -13,6 +13,7 @@ import {
   fetchHarmonizedData,
   downloadHarmonizedCsv,
   fetchHealthStatus,
+  normalizeBoundingBox,
   HarmonizeParams,
   PRESET_REGIONS,
 } from '@/utils/api';
@@ -50,12 +51,14 @@ export default function DisasterResponseDashboard() {
       setLoading(true);
       setErrorNotice(null);
 
+      const targetBbox = overrideParams?.bbox ?? bbox;
+
       try {
         const queryParams: HarmonizeParams = {
-          bbox,
+          bbox: targetBbox,
           spatial_bandwidth_km: overrideParams?.spatial_bandwidth_km ?? 2.5,
           temporal_bandwidth_hours: overrideParams?.temporal_bandwidth_hours ?? 6.0,
-          min_cluster_size: overrideParams?.min_cluster_size ?? 3,
+          min_cluster_size: overrideParams?.min_cluster_size ?? 2,
           min_samples: overrideParams?.min_samples ?? 1,
           cluster_selection_epsilon: overrideParams?.cluster_selection_epsilon ?? 0.5,
           min_confidence: overrideParams?.min_confidence ?? 0.0,
@@ -64,11 +67,16 @@ export default function DisasterResponseDashboard() {
         };
 
         const result = await fetchHarmonizedData(queryParams);
-        setClusters(result.clusters);
-        setSummary(result.summary);
-        setNoisePoints(result.noise_points || []);
+        setClusters([...(result.clusters || [])]);
+        setSummary(result.summary ? { ...result.summary } : null);
+        setNoisePoints([...(result.noise_points || [])]);
       } catch (err: any) {
-        console.error('Harmonization request error:', err);
+        console.error('[Dashboard Error] Failed to harmonize AOI bounding box:', {
+          error: err,
+          message: err.message,
+          stack: err.stack,
+          bbox,
+        });
         setErrorNotice(err.message || 'Failed to connect to FastAPI /api/harmonize endpoint');
       } finally {
         setLoading(false);
@@ -92,7 +100,7 @@ export default function DisasterResponseDashboard() {
 
   // When user draws an Area of Interest on map or types coordinates
   const handleBoundsChange = (newBbox: BoundingBox) => {
-    setBbox(newBbox);
+    setBbox(normalizeBoundingBox(newBbox));
   };
 
   // Re-run harmonization whenever bbox changes

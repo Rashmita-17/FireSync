@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { BoundingBox, PresetRegion } from '@/types/fire';
-import { PRESET_REGIONS, HarmonizeParams } from '@/utils/api';
+import { PRESET_REGIONS, HarmonizeParams, normalizeBoundingBox } from '@/utils/api';
 import {
   Compass,
   Sliders,
@@ -50,7 +50,7 @@ export default function ControlPanel({
   // Hyperparameters
   const [spatialBandwidth, setSpatialBandwidth] = useState(2.5);
   const [temporalBandwidth, setTemporalBandwidth] = useState(6.0);
-  const [minClusterSize, setMinClusterSize] = useState(3);
+  const [minClusterSize, setMinClusterSize] = useState(2);
   const [minConfidence, setMinConfidence] = useState(0);
 
   // Handle manual coordinate input changes
@@ -71,6 +71,7 @@ export default function ControlPanel({
 
   const handleApplyHarmonize = () => {
     onHarmonize({
+      bbox: normalizeBoundingBox(bbox),
       spatial_bandwidth_km: spatialBandwidth,
       temporal_bandwidth_hours: temporalBandwidth,
       min_cluster_size: minClusterSize,

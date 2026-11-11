@@ -1,6 +1,6 @@
 import io
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime, timezone, time as dtime
 from typing import Dict, Any, Optional, Union, BinaryIO, Tuple
 import numpy as np
 import pandas as pd
@@ -39,7 +39,7 @@ class DataIngestionService:
     """
     Senior Data Engineer batch ingestion pipeline for NASA FIRMS historical datasets.
     Handles schema variations across MODIS (Terra/Aqua) and VIIRS (S-NPP/NOAA-20/NOAA-21).
-    Utilizes Pandas chunking and SQLAlchemy bulk mapping for high-throughput ingestion.
+    Utilizes Pandas vectorization and SQLAlchemy bulk mapping for high-throughput ingestion.
     """
 
     CONFIDENCE_VIIRS_MAP = {
@@ -51,6 +51,27 @@ class DataIngestionService:
         "high": 95.0,
     }
 
+    SATELLITE_NORMALIZATION = {
+        "T": "Terra",
+        "TERRA": "Terra",
+        "A": "Aqua",
+        "AQUA": "Aqua",
+        "N20": "NOAA-20",
+        "NOAA20": "NOAA-20",
+        "NOAA-20": "NOAA-20",
+        "J1": "NOAA-20",
+        "JPSS-1": "NOAA-20",
+        "N21": "NOAA-21",
+        "NOAA21": "NOAA-21",
+        "NOAA-21": "NOAA-21",
+        "J2": "NOAA-21",
+        "JPSS-2": "NOAA-21",
+        "N": "Suomi-NPP",
+        "NPP": "Suomi-NPP",
+        "SNPP": "Suomi-NPP",
+        "SUOMI-NPP": "Suomi-NPP",
+    }
+
     @staticmethod
     def _normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
         """Standardize column names to lowercase and stripped characters."""
@@ -58,19 +79,19 @@ class DataIngestionService:
         return df
 
     @classmethod
-    def _parse_confidence(cls, row_series: pd.Series, instrument: str) -> Tuple[float, str]:
+    def _parse_confidence(cls, row_dict: Dict[str, Any], instrument: str) -> Tuple[float, str]:
         """
         Normalizes confidence between MODIS (0-100 numerical) and VIIRS (low/nominal/high categorical).
         Returns (normalized_float_0_to_100, raw_string).
         """
-        raw_val = row_series.get("confidence")
+        raw_val = row_dict.get("confidence")
         if pd.isna(raw_val) or raw_val is None:
             return 50.0, "50"
 
         raw_str = str(raw_val).strip()
+        lower_str = raw_str.lower()
 
         # Check categorical (common in VIIRS)
-        lower_str = raw_str.lower()
         if lower_str in cls.CONFIDENCE_VIIRS_MAP:
             return cls.CONFIDENCE_VIIRS_MAP[lower_str], raw_str
 
@@ -81,6 +102,52 @@ class DataIngestionService:
             return clamped, raw_str
         except ValueError:
             return 50.0, raw_str
+
+    @classmethod
+    def _infer_instrument(cls, row_dict: Dict[str, Any], source_name: str) -> str:
+        """
+        Infers instrument (MODIS vs VIIRS) from column values, satellite platform, or filename.
+        """
+        # 1. Explicit instrument column
+        inst = row_dict.get("instrument")
+        if pd.notna(inst) and inst:
+            u_inst = str(inst).strip().upper()
+            if "MODIS" in u_inst:
+                return "MODIS"
+            if "VIIRS" in u_inst:
+                return "VIIRS"
+            return u_inst
+
+        # 2. Inspect source filename
+        u_src = source_name.upper()
+        if "MODIS" in u_src or "M-C6" in u_src:
+            return "MODIS"
+        if "VIIRS" in u_src or "J1" in u_src or "SV" in u_src or "J1_VIIRS" in u_src:
+            return "VIIRS"
+
+        # 3. Inspect satellite value
+        sat_raw = str(row_dict.get("satellite", "")).strip().upper()
+        if sat_raw in ["T", "A", "TERRA", "AQUA"]:
+            return "MODIS"
+        if sat_raw in ["N20", "N21", "N", "NPP", "SNPP", "NOAA-20", "NOAA-21", "J1", "J2"]:
+            return "VIIRS"
+
+        # 4. Sensor-specific channels
+        if "bright_ti4" in row_dict or "bright_ti5" in row_dict:
+            return "VIIRS"
+        if "bright_t31" in row_dict:
+            return "MODIS"
+
+        return "MODIS"
+
+    @classmethod
+    def _normalize_satellite(cls, sat_raw: Any, instrument: str) -> str:
+        """Standardizes satellite identifiers into human-readable platform names."""
+        if pd.isna(sat_raw) or not sat_raw:
+            return "Terra" if instrument == "MODIS" else "NOAA-20"
+        s = str(sat_raw).strip()
+        upper_s = s.upper()
+        return cls.SATELLITE_NORMALIZATION.get(upper_s, s)
 
     @staticmethod
     def _parse_acq_datetime(date_val: Any, time_val: Any) -> Optional[datetime]:
@@ -121,10 +188,11 @@ class DataIngestionService:
         df: pd.DataFrame,
         db: Session,
         source_name: str = "dataframe",
-        chunk_size: int = 1000
+        chunk_size: int = 5000
     ) -> IngestionReport:
         """
         Ingests a pre-loaded Pandas DataFrame into the Observation database table.
+        Optimized with dictionary records iteration and batch SQLAlchemy mapping.
         """
         start_time = time.perf_counter()
         report = IngestionReport(filename=source_name)
@@ -144,11 +212,13 @@ class DataIngestionService:
             raise ValueError(f"Missing required latitude/longitude columns in {source_name}. Found: {list(df.columns)}")
 
         # Drop invalid coordinates
+        lat_numeric = pd.to_numeric(df[lat_col], errors="coerce")
+        lon_numeric = pd.to_numeric(df[lon_col], errors="coerce")
         valid_coords = (
             df[lat_col].notna() &
             df[lon_col].notna() &
-            (pd.to_numeric(df[lat_col], errors="coerce").between(-90.0, 90.0)) &
-            (pd.to_numeric(df[lon_col], errors="coerce").between(-180.0, 180.0))
+            lat_numeric.between(-90.0, 90.0) &
+            lon_numeric.between(-180.0, 180.0)
         )
         clean_df = df[valid_coords].copy()
         report.skipped_rows = len(df) - len(clean_df)
@@ -157,17 +227,28 @@ class DataIngestionService:
             report.duration_seconds = time.perf_counter() - start_time
             return report
 
-        # Detect instrument / satellite columns
-        has_instrument = "instrument" in clean_df.columns
-        has_satellite = "satellite" in clean_df.columns
+        # Pre-compute datetime vectorially if possible for peak performance
+        if "acq_datetime" not in clean_df.columns and "acq_date" in clean_df.columns and "acq_time" in clean_df.columns:
+            time_padded = clean_df["acq_time"].astype(str).str.split(".").str[0].str.zfill(4)
+            time_padded = time_padded.str.slice(0, 4)
+            dt_strings = clean_df["acq_date"].astype(str) + " " + time_padded.str.slice(0, 2) + ":" + time_padded.str.slice(2, 4)
+            clean_df["_dt_vector"] = pd.to_datetime(dt_strings, format="%Y-%m-%d %H:%M", errors="coerce")
+        else:
+            clean_df["_dt_vector"] = pd.NaT
 
+        rows = clean_df.to_dict(orient="records")
+        now_utc = datetime.now(timezone.utc)
         records_to_insert = []
-        for _, row in clean_df.iterrows():
+
+        for row in rows:
             lat = float(row[lat_col])
             lon = float(row[lon_col])
 
-            # Timestamp parsing
-            if "acq_datetime" in row and pd.notna(row["acq_datetime"]):
+            # Datetime resolution
+            dt = None
+            if pd.notna(row.get("_dt_vector")):
+                dt = row["_dt_vector"].to_pydatetime()
+            elif "acq_datetime" in row and pd.notna(row["acq_datetime"]):
                 dt = pd.to_datetime(row["acq_datetime"]).to_pydatetime()
             else:
                 date_val = row.get("acq_date")
@@ -177,29 +258,9 @@ class DataIngestionService:
                     report.skipped_rows += 1
                     continue
 
-            # Instrument identification
-            if has_instrument and pd.notna(row["instrument"]):
-                inst = str(row["instrument"]).strip().upper()
-                if "MODIS" in inst:
-                    instrument_name = "MODIS"
-                elif "VIIRS" in inst:
-                    instrument_name = "VIIRS"
-                else:
-                    instrument_name = inst
-            else:
-                # Infer from satellite or brightness columns
-                sat_raw = str(row.get("satellite", "")).upper()
-                if "TERRA" in sat_raw or "AQUA" in sat_raw:
-                    instrument_name = "MODIS"
-                elif "NPP" in sat_raw or "NOAA" in sat_raw or "JPSS" in sat_raw:
-                    instrument_name = "VIIRS"
-                elif "bright_ti4" in row:
-                    instrument_name = "VIIRS"
-                else:
-                    instrument_name = "MODIS"
-
-            # Satellite platform
-            satellite_name = str(row.get("satellite", "Unknown")).strip()
+            # Instrument & Satellite identification
+            instrument_name = self._infer_instrument(row, source_name)
+            satellite_name = self._normalize_satellite(row.get("satellite"), instrument_name)
 
             # Confidence normalization
             norm_conf, raw_conf = self._parse_confidence(row, instrument_name)
@@ -214,7 +275,7 @@ class DataIngestionService:
 
             # Brightness temperature
             brightness_val = None
-            for bcol in ["brightness", "bright_ti4", "bright_t31"]:
+            for bcol in ["brightness", "bright_ti4", "bright_t31", "bright_ti5"]:
                 if bcol in row and pd.notna(row[bcol]):
                     try:
                         brightness_val = float(row[bcol])
@@ -268,17 +329,17 @@ class DataIngestionService:
                 "track": track_val,
                 "daynight": daynight_val,
                 "source_file": source_name,
-                "created_at": datetime.utcnow(),
+                "created_at": now_utc,
             })
 
-            # Bulk insert in batches to maintain high throughput and minimize memory footprint
+            # Bulk insert in batches to maintain high throughput and low memory footprint
             if len(records_to_insert) >= chunk_size:
                 db.bulk_insert_mappings(Observation, records_to_insert)
                 db.commit()
                 report.valid_rows_inserted += len(records_to_insert)
                 records_to_insert = []
 
-        # Flush remainder
+        # Flush remaining records
         if records_to_insert:
             db.bulk_insert_mappings(Observation, records_to_insert)
             db.commit()
@@ -292,7 +353,7 @@ class DataIngestionService:
         filepath_or_buffer: Union[str, BinaryIO, io.StringIO],
         db: Session,
         source_name: Optional[str] = None,
-        chunksize: int = 5000,
+        chunksize: int = 25000,
     ) -> IngestionReport:
         """
         Streams and parses a CSV file in chunks using Pandas and bulk inserts into SQLAlchemy.
@@ -303,7 +364,7 @@ class DataIngestionService:
         overall_report = IngestionReport(filename=str(name))
 
         for chunk_df in pd.read_csv(filepath_or_buffer, chunksize=chunksize, low_memory=False):
-            sub_report = self.ingest_dataframe(chunk_df, db, source_name=str(name), chunk_size=1000)
+            sub_report = self.ingest_dataframe(chunk_df, db, source_name=str(name), chunk_size=5000)
             overall_report.total_rows_read += sub_report.total_rows_read
             overall_report.valid_rows_inserted += sub_report.valid_rows_inserted
             overall_report.skipped_rows += sub_report.skipped_rows
@@ -315,3 +376,4 @@ class DataIngestionService:
 
 
 ingestion_service = DataIngestionService()
+

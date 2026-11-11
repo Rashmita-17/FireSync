@@ -13,12 +13,43 @@ class BoundingBox(BaseModel):
     max_lon: float = Field(..., ge=-180.0, le=180.0, description="Maximum longitude (East)")
     max_lat: float = Field(..., ge=-90.0, le=90.0, description="Maximum latitude (North)")
 
+    @model_validator(mode="before")
+    @classmethod
+    def wrap_coordinates_before_validation(cls, data: Any) -> Any:
+        """
+        Intercepts raw input dictionary before field constraints to wrap longitudes
+        outside [-180, 180] from infinite map panning (e.g. -232.73 -> 127.27).
+        """
+        if isinstance(data, dict):
+            for k in ["min_lon", "max_lon"]:
+                if k in data and isinstance(data[k], (int, float)):
+                    lon = float(data[k])
+                    wrapped = ((((lon + 180.0) % 360.0) + 360.0) % 360.0) - 180.0
+                    data[k] = round(wrapped, 4)
+            for k in ["min_lat", "max_lat"]:
+                if k in data and isinstance(data[k], (int, float)):
+                    lat = float(data[k])
+                    data[k] = round(max(-90.0, min(90.0, lat)), 4)
+        return data
+
     @model_validator(mode="after")
     def validate_bounds(self) -> "BoundingBox":
-        if self.min_lon > self.max_lon:
-            raise ValueError(f"min_lon ({self.min_lon}) cannot be greater than max_lon ({self.max_lon})")
-        if self.min_lat > self.max_lat:
-            raise ValueError(f"min_lat ({self.min_lat}) cannot be greater than max_lat ({self.max_lat})")
+        # Auto-detect and correct swapped Lon/Lat vs Lat/Lon orders:
+        lats = [self.min_lat, self.max_lat]
+        lons = [self.min_lon, self.max_lon]
+
+        # Latitude cannot exceed [-90, 90] in EPSG:4326
+        if any(abs(l) > 90.0 for l in lats):
+            lats, lons = lons, lats
+        # In North America / Western Sector, longitudes are negative and latitudes are positive
+        elif all(l < 0 for l in lats) and all(l > 0 for l in lons):
+            lats, lons = lons, lats
+
+        # Normalize min and max bounds to prevent 422 errors when drawn right-to-left or top-to-bottom
+        self.min_lat = float(min(lats))
+        self.max_lat = float(max(lats))
+        self.min_lon = float(min(lons))
+        self.max_lon = float(max(lons))
         return self
 
 

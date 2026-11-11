@@ -1,26 +1,39 @@
 import os
+import logging
 from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from typing import Generator
 from app.core.config import settings
 
-# Ensure data directory exists for SQLite
-if settings.DATABASE_URL.startswith("sqlite"):
-    db_path = settings.DATABASE_URL.replace("sqlite:///", "")
-    Path(os.path.dirname(os.path.abspath(db_path))).mkdir(parents=True, exist_ok=True)
+logger = logging.getLogger("nasa_fire_harmonization.database")
 
-# Create database engine
-# connect_args={"check_same_thread": False} is required for SQLite in multi-threaded FastAPI apps
-engine_kwargs = {}
-if settings.DATABASE_URL.startswith("sqlite"):
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
-else:
-    engine_kwargs["pool_pre_ping"] = True
-    engine_kwargs["pool_size"] = 10
-    engine_kwargs["max_overflow"] = 20
+def create_db_engine(db_url: str):
+    engine_kwargs = {}
+    if db_url.startswith("sqlite"):
+        db_path = db_url.replace("sqlite:///", "")
+        if db_path and db_path != ":memory:":
+            Path(os.path.dirname(os.path.abspath(db_path))).mkdir(parents=True, exist_ok=True)
+        engine_kwargs["connect_args"] = {"check_same_thread": False}
+    else:
+        engine_kwargs["pool_pre_ping"] = True
+        engine_kwargs["pool_size"] = 10
+        engine_kwargs["max_overflow"] = 20
+    return create_engine(db_url, **engine_kwargs)
 
-engine = create_engine(settings.DATABASE_URL, **engine_kwargs)
+active_db_url = settings.DATABASE_URL
+try:
+    engine = create_db_engine(active_db_url)
+    # Test connection
+    with engine.connect() as conn:
+        pass
+except Exception as exc:
+    logger.warning(
+        f"Unable to connect to primary database ({active_db_url}): {exc}. "
+        "Falling back to local SQLite database at sqlite:///data/nasa_observations.db"
+    )
+    active_db_url = "sqlite:///data/nasa_observations.db"
+    engine = create_db_engine(active_db_url)
 
 # Session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

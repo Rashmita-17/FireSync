@@ -158,3 +158,31 @@ def test_ingestion_service_dataframe(db_session):
     assert report.valid_rows_inserted == 2
     assert report.modis_rows == 1
     assert report.viirs_rows == 1
+
+
+def test_harmonize_out_of_range_lon_wrapping(db_session):
+    """
+    Verifies that when Mapbox/Leaflet continuous panning outputs longitudes
+    outside [-180, 180] (e.g. -235 to -225), BoundingBox wraps them to standard
+    EPSG:4326 range (e.g. 125 to 135) and GET/POST harmonization succeeds without 422 error.
+    """
+    bbox = BoundingBox(
+        min_lon=-232.73,
+        min_lat=36.0,
+        max_lon=-220.0,
+        max_lat=45.0
+    )
+    assert -180.0 <= bbox.min_lon <= 180.0
+    assert -180.0 <= bbox.max_lon <= 180.0
+    assert bbox.min_lon <= bbox.max_lon
+
+    # Test GET endpoint with out-of-range lon values
+    result_get = harmonize_get(
+        min_lon=-235.0,
+        min_lat=36.0,
+        max_lon=-225.0,
+        max_lat=45.0,
+        db=db_session
+    )
+    assert result_get.status == "success"
+

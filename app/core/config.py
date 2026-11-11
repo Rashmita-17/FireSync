@@ -7,12 +7,12 @@ class Settings(BaseSettings):
     Application configuration settings for the NASA MODIS-VIIRS Harmonization Service.
     Configurable via environment variables or .env file.
     """
-    model_config = SettingsConfigDict(env_file=".env", case_sensitive=True)
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=True, extra="ignore")
 
     PROJECT_NAME: str = "NASA Space Apps: MODIS & VIIRS Harmonization Engine"
     API_V1_STR: str = "/api"
     DEBUG: bool = False
-    
+    FIRMS_MAP_KEY: str | None = None
     # Database Settings
     DATABASE_URL: str = Field(
         default="sqlite:///./data/nasa_observations.db",

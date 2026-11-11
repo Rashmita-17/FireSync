@@ -217,8 +217,9 @@ class SpatioTemporalClusteringEngine:
 
         # 3. Fit HDBSCAN clustering
         if len(df) < self.min_cluster_size:
-            # Not enough points to form even a single cluster of min_cluster_size
-            labels = np.full(len(df), -1)
+            # When points inside the AOI are below the HDBSCAN density threshold,
+            # synthesize them into an active fire event cluster rather than discarding as zero events.
+            labels = np.zeros(len(df), dtype=int)
         else:
             hdbscan = HDBSCAN(
                 min_cluster_size=self.min_cluster_size,

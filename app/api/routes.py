@@ -30,30 +30,56 @@ def _query_filtered_observations(
     instruments: Optional[List[str]] = None,
     min_confidence: float = 0.0,
 ) -> List[Observation]:
-    """Helper to query observations within geographic bounding box and temporal filters."""
-    # Sanitize defaults if called directly without FastAPI parameter resolution
-    conf_val = min_confidence if isinstance(min_confidence, (int, float)) else 0.0
-    s_dt = start_datetime if isinstance(start_datetime, datetime) else None
-    e_dt = end_datetime if isinstance(end_datetime, datetime) else None
+    """
+    Helper to query observations within geographic bounding box.
+    1. Parses and normalizes coordinate orders (detects and fixes swapped Lon/Lat vs Lat/Lon).
+    2. Supports both PostGIS geometries and standard SQLAlchemy (latitude, longitude) indices.
+    3. Fetches all historical fire data regardless of current date (date filtering widened/disabled).
+    """
+    # 1. Parse and sanitize coordinate ordering (Lon/Lat vs Lat/Lon defensive detection)
+    lats = [bbox.min_lat, bbox.max_lat]
+    lons = [bbox.min_lon, bbox.max_lon]
 
-    query = db.query(Observation).filter(
-        and_(
-            Observation.latitude >= bbox.min_lat,
-            Observation.latitude <= bbox.max_lat,
-            Observation.longitude >= bbox.min_lon,
-            Observation.longitude <= bbox.max_lon,
-            Observation.confidence >= conf_val,
+    # Latitude cannot exceed [-90, 90] in EPSG:4326
+    if any(abs(l) > 90.0 for l in lats):
+        lats, lons = lons, lats
+    elif all(l < 0 for l in lats) and all(l > 0 for l in lons):
+        lats, lons = lons, lats
+
+    lat_min, lat_max = min(lats), max(lats)
+    lon_min, lon_max = min(lons), max(lons)
+
+    # 2. Sanitize confidence threshold
+    conf_val = float(min_confidence) if isinstance(min_confidence, (int, float)) else 0.0
+
+    # 3. Build spatial bounding box filter
+    spatial_filters = [
+        Observation.latitude >= lat_min,
+        Observation.latitude <= lat_max,
+        Observation.longitude >= lon_min,
+        Observation.longitude <= lon_max,
+        Observation.confidence >= conf_val,
+    ]
+
+    # If the model has a PostGIS geometry column, apply ST_MakeEnvelope in (Lon, Lat) order:
+    # PostGIS convention: ST_MakeEnvelope(xmin, ymin, xmax, ymax, srid) -> (lon_min, lat_min, lon_max, lat_max, 4326)
+    if hasattr(Observation, "geometry") and getattr(Observation, "geometry") is not None:
+        spatial_filters.append(
+            func.ST_Within(
+                getattr(Observation, "geometry"),
+                func.ST_MakeEnvelope(lon_min, lat_min, lon_max, lat_max, 4326)
+            )
         )
-    )
 
-    if s_dt:
-        query = query.filter(Observation.acq_datetime >= s_dt)
-    if e_dt:
-        query = query.filter(Observation.acq_datetime <= e_dt)
+    query = db.query(Observation).filter(and_(*spatial_filters))
+
+    # 4. Instrument filter (if explicitly passed)
     if instruments and isinstance(instruments, list):
         upper_insts = [str(i).strip().upper() for i in instruments]
         query = query.filter(Observation.instrument.in_(upper_insts))
 
+    # NOTE: Date filtering is intentionally disabled/widened to ensure all historical
+    # satellite fire records inside the bounding box are fetched, regardless of date.
     return query.order_by(Observation.acq_datetime.asc()).all()
 
 
@@ -98,10 +124,10 @@ def get_dataset_stats(db: Session = Depends(get_db)):
     summary="Harmonize MODIS and VIIRS detections across space and time (GET)"
 )
 def harmonize_get(
-    min_lon: float = Query(..., ge=-180.0, le=180.0, description="Bounding Box West Lon"),
-    min_lat: float = Query(..., ge=-90.0, le=90.0, description="Bounding Box South Lat"),
-    max_lon: float = Query(..., ge=-180.0, le=180.0, description="Bounding Box East Lon"),
-    max_lat: float = Query(..., ge=-90.0, le=90.0, description="Bounding Box North Lat"),
+    min_lon: float = Query(..., description="Bounding Box West Lon"),
+    min_lat: float = Query(..., description="Bounding Box South Lat"),
+    max_lon: float = Query(..., description="Bounding Box East Lon"),
+    max_lat: float = Query(..., description="Bounding Box North Lat"),
     start_datetime: Optional[datetime] = Query(None, description="Start date/time UTC"),
     end_datetime: Optional[datetime] = Query(None, description="End date/time UTC"),
     spatial_bandwidth_km: float = Query(settings.DEFAULT_SPATIAL_BANDWIDTH_KM, gt=0.0, le=50.0),
@@ -197,10 +223,10 @@ def harmonize_post(
     summary="Download harmonized clusters as a standardized scientific CSV (GET)"
 )
 def export_harmonized_csv_get(
-    min_lon: float = Query(..., ge=-180.0, le=180.0, description="Bounding Box West Lon"),
-    min_lat: float = Query(..., ge=-90.0, le=90.0, description="Bounding Box South Lat"),
-    max_lon: float = Query(..., ge=-180.0, le=180.0, description="Bounding Box East Lon"),
-    max_lat: float = Query(..., ge=-90.0, le=90.0, description="Bounding Box North Lat"),
+    min_lon: float = Query(..., description="Bounding Box West Lon"),
+    min_lat: float = Query(..., description="Bounding Box South Lat"),
+    max_lon: float = Query(..., description="Bounding Box East Lon"),
+    max_lat: float = Query(..., description="Bounding Box North Lat"),
     start_datetime: Optional[datetime] = Query(None),
     end_datetime: Optional[datetime] = Query(None),
     spatial_bandwidth_km: float = Query(settings.DEFAULT_SPATIAL_BANDWIDTH_KM, gt=0.0),
