@@ -1,9 +1,12 @@
+import logging
 from datetime import datetime
 from typing import Optional, List
 from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, and_
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.core.database import get_db
 from app.core.config import settings
@@ -83,16 +86,177 @@ def _query_filtered_observations(
     return query.order_by(Observation.acq_datetime.asc()).all()
 
 
-@router.get("/health", summary="Service Health and Engine Status")
+@router.get("/health", summary="Service Health and Database Readiness")
 def health_check(db: Session = Depends(get_db)):
-    """Healthcheck endpoint verifying DB connectivity and record counts."""
-    total_records = db.query(func.count(Observation.id)).scalar() or 0
+    """Healthcheck endpoint verifying DB connectivity, status, and record counts."""
+    try:
+        total_records = db.query(func.count(Observation.id)).scalar() or 0
+        is_empty = total_records == 0
+        return {
+            "status": "healthy" if not is_empty else "empty_database",
+            "service": settings.PROJECT_NAME,
+            "database_records": total_records,
+            "is_empty": is_empty,
+            "clustering_engine": "sklearn.cluster.HDBSCAN",
+            "supported_sensors": ["MODIS (Terra, Aqua)", "VIIRS (Suomi-NPP, NOAA-20, NOAA-21)"],
+            "tip": "Database is populated and ready for queries." if not is_empty else "Database is empty (0 rows). Use POST /api/seed-sample to load demo records."
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "database_records": 0,
+            "is_empty": True,
+        }
+
+
+@router.get("/db-status", summary="Production Database Diagnostics and Row Counts")
+def get_db_status(db: Session = Depends(get_db)):
+    """
+    Diagnostic endpoint to count rows and verify if production SQLite database is empty.
+    Checks total rows, instrument distribution (MODIS vs VIIRS), and timestamp ranges.
+    """
+    try:
+        total_count = db.query(func.count(Observation.id)).scalar() or 0
+        modis_count = db.query(func.count(Observation.id)).filter(Observation.instrument == "MODIS").scalar() or 0
+        viirs_count = db.query(func.count(Observation.id)).filter(Observation.instrument == "VIIRS").scalar() or 0
+        
+        min_date = db.query(func.min(Observation.acq_datetime)).scalar()
+        max_date = db.query(func.max(Observation.acq_datetime)).scalar()
+        is_empty = total_count == 0
+
+        return {
+            "status": "healthy" if not is_empty else "empty_database",
+            "database_connected": True,
+            "total_records": total_count,
+            "is_empty": is_empty,
+            "modis_records": modis_count,
+            "viirs_records": viirs_count,
+            "earliest_record_utc": min_date.isoformat() if min_date else None,
+            "latest_record_utc": max_date.isoformat() if max_date else None,
+            "message": "Production database contains active records." if not is_empty else "WARNING: SQLite database contains 0 records! If deployed to production without CSV files, call POST /api/seed-sample to insert demo records.",
+            "recommended_query_bbox": {
+                "min_lon": -125.0,
+                "min_lat": 36.0,
+                "max_lon": -118.0,
+                "max_lat": 45.0,
+                "description": "Western US Monitoring Sector (California / Oregon / Nevada)"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Database status check failed: {e}")
+        return {
+            "status": "error",
+            "database_connected": False,
+            "error": str(e),
+            "total_records": 0,
+            "is_empty": True,
+        }
+
+
+@router.post("/seed-sample", summary="Seed Sample NASA FIRMS MODIS & VIIRS Records")
+def seed_sample_records(db: Session = Depends(get_db)):
+    """
+    Seeds realistic NASA FIRMS fire detections (MODIS 1km + VIIRS 375m)
+    in the Western Sector (Sierra Nevada / California) so cloud deployments
+    with empty SQLite databases can immediately visualize active fire complexes.
+    """
+    import random
+    from datetime import datetime, timedelta
+
+    existing_count = db.query(func.count(Observation.id)).scalar() or 0
+    if existing_count > 0:
+        return {
+            "message": f"Database already contains {existing_count:,} records. Seeding skipped.",
+            "total_records": existing_count,
+            "is_empty": False
+        }
+
+    now = datetime.utcnow()
+    sample_obs = []
+    
+    # Complex 1: Sierra Nevada Forest Fire (Lat ~37.85, Lon ~-119.55)
+    for i in range(15):
+        sample_obs.append(
+            Observation(
+                latitude=37.85 + random.uniform(-0.02, 0.02),
+                longitude=-119.55 + random.uniform(-0.02, 0.02),
+                acq_datetime=now - timedelta(hours=random.uniform(0.5, 4.0)),
+                instrument="MODIS",
+                satellite="Aqua",
+                confidence=random.uniform(75, 95),
+                frp=random.uniform(40, 180),
+                scan=1.0,
+                track=1.0,
+                daynight="D",
+                source_file="sample_seed.csv",
+                created_at=now,
+            )
+        )
+    for i in range(35):
+        sample_obs.append(
+            Observation(
+                latitude=37.85 + random.uniform(-0.025, 0.025),
+                longitude=-119.55 + random.uniform(-0.025, 0.025),
+                acq_datetime=now - timedelta(hours=random.uniform(0.2, 3.8)),
+                instrument="VIIRS",
+                satellite="NOAA-20",
+                confidence=random.uniform(80, 99),
+                frp=random.uniform(15, 90),
+                scan=0.375,
+                track=0.375,
+                daynight="D",
+                source_file="sample_seed.csv",
+                created_at=now,
+            )
+        )
+
+    # Complex 2: Shasta-Klamath Ridge Fire (Lat ~41.5, Lon ~-122.1)
+    for i in range(8):
+        sample_obs.append(
+            Observation(
+                latitude=41.5 + random.uniform(-0.015, 0.015),
+                longitude=-122.1 + random.uniform(-0.015, 0.015),
+                acq_datetime=now - timedelta(hours=random.uniform(1.0, 5.0)),
+                instrument="MODIS",
+                satellite="Terra",
+                confidence=random.uniform(70, 90),
+                frp=random.uniform(30, 120),
+                scan=1.0,
+                track=1.0,
+                daynight="D",
+                source_file="sample_seed.csv",
+                created_at=now,
+            )
+        )
+    for i in range(25):
+        sample_obs.append(
+            Observation(
+                latitude=41.5 + random.uniform(-0.02, 0.02),
+                longitude=-122.1 + random.uniform(-0.02, 0.02),
+                acq_datetime=now - timedelta(hours=random.uniform(0.8, 4.5)),
+                instrument="VIIRS",
+                satellite="Suomi-NPP",
+                confidence=random.uniform(85, 100),
+                frp=random.uniform(10, 75),
+                scan=0.375,
+                track=0.375,
+                daynight="D",
+                source_file="sample_seed.csv",
+                created_at=now,
+            )
+        )
+
+    db.bulk_save_objects(sample_obs)
+    db.commit()
+
+    total_now = db.query(func.count(Observation.id)).scalar() or 0
     return {
-        "status": "healthy",
-        "service": settings.PROJECT_NAME,
-        "database_records": total_records,
-        "clustering_engine": "sklearn.cluster.HDBSCAN",
-        "supported_sensors": ["MODIS (Terra, Aqua)", "VIIRS (Suomi-NPP, NOAA-20, NOAA-21)"]
+        "status": "success",
+        "message": f"Successfully seeded {len(sample_obs)} sample MODIS & VIIRS observations into database.",
+        "total_records": total_now,
+        "is_empty": False
     }
 
 

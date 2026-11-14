@@ -1,24 +1,37 @@
 import { BoundingBox, HarmonizationResponse, BackendStats, PresetRegion } from '@/types/fire';
 
 /**
- * Resolves the backend API base URL with defensive validation.
- * If NEXT_PUBLIC_API_URL was set to an API key or an invalid string,
- * it safely falls back to http://localhost:8000.
+ * Resolves the backend API base URL strictly using process.env.NEXT_PUBLIC_API_URL.
+ * If unset in development, defaults to http://localhost:8000.
  */
-function resolveApiBaseUrl(): string {
+export function resolveApiBaseUrl(): string {
   const envUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
-  if (envUrl && (envUrl.startsWith('http://') || envUrl.startsWith('https://'))) {
-    return envUrl.replace(/\/+$/, '');
+  if (envUrl) {
+    let cleanUrl = envUrl.replace(/\/+$/, '');
+    if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
+      cleanUrl = `https://${cleanUrl}`;
+    }
+    return cleanUrl;
   }
   return 'http://localhost:8000';
 }
 
 export const API_BASE_URL = resolveApiBaseUrl();
 
-// Alternate URL for Windows IPv4 fallback (127.0.0.1 vs localhost)
-const ALTERNATE_API_BASE_URL = API_BASE_URL.includes('localhost')
-  ? API_BASE_URL.replace('localhost', '127.0.0.1')
-  : API_BASE_URL.replace('127.0.0.1', 'localhost');
+// Debug log printed to console so the active backend URL is immediately visible in Vercel logs / browser console
+if (typeof window !== 'undefined') {
+  console.log(
+    `[FireSync API Debug] Configured API_BASE_URL: "${API_BASE_URL}" (from process.env.NEXT_PUBLIC_API_URL: "${process.env.NEXT_PUBLIC_API_URL || ''}")`
+  );
+}
+
+// Alternate URL for local Windows IPv4 fallback (127.0.0.1 vs localhost) - only used for local dev
+const isLocalhost = API_BASE_URL.includes('localhost') || API_BASE_URL.includes('127.0.0.1');
+const ALTERNATE_API_BASE_URL = isLocalhost
+  ? API_BASE_URL.includes('localhost')
+    ? API_BASE_URL.replace('localhost', '127.0.0.1')
+    : API_BASE_URL.replace('127.0.0.1', 'localhost')
+  : API_BASE_URL;
 
 export const PRESET_REGIONS: PresetRegion[] = [
   {
@@ -116,7 +129,9 @@ export async function fetchHarmonizedData(params: HarmonizeParams): Promise<Harm
   };
 
   const executePost = async (baseUrl: string) => {
-    return fetch(`${baseUrl}/api/harmonize`, {
+    const fullUrl = `${baseUrl}/api/harmonize`;
+    console.log(`[FireSync API Fetch] Calling: ${fullUrl}`);
+    return fetch(fullUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -129,26 +144,27 @@ export async function fetchHarmonizedData(params: HarmonizeParams): Promise<Harm
   try {
     response = await executePost(API_BASE_URL);
   } catch (err: any) {
-    console.warn(`[Harmonization Fetch] Initial request to ${API_BASE_URL} failed (${err.message}). Retrying with ${ALTERNATE_API_BASE_URL}...`);
-    try {
-      response = await executePost(ALTERNATE_API_BASE_URL);
-      activeUrl = ALTERNATE_API_BASE_URL;
-    } catch (retryErr: any) {
-      console.error(`[Harmonization Network Error] Rejection from both ${API_BASE_URL} and ${ALTERNATE_API_BASE_URL}:`, {
-        error: retryErr,
-        message: retryErr.message,
-        payload,
-      });
-      throw new Error(`Failed to reach FastAPI backend at ${API_BASE_URL}. Ensure uvicorn is running: ${retryErr.message}`);
+    if (isLocalhost) {
+      console.warn(`[Harmonization Fetch] Initial request to ${API_BASE_URL} failed (${err.message}). Retrying with alternate local IP ${ALTERNATE_API_BASE_URL}...`);
+      try {
+        response = await executePost(ALTERNATE_API_BASE_URL);
+        activeUrl = ALTERNATE_API_BASE_URL;
+      } catch (retryErr: any) {
+        console.error(`[Harmonization Network Error] Failed to reach backend at ${API_BASE_URL}:`, retryErr);
+        throw new Error(`Failed to reach FastAPI backend at ${API_BASE_URL}. Ensure server is running: ${retryErr.message}`);
+      }
+    } else {
+      console.error(`[Harmonization Network Error] Failed to reach remote backend at ${API_BASE_URL}:`, err);
+      throw new Error(`Failed to reach production FastAPI backend at ${API_BASE_URL}: ${err.message}`);
     }
   }
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error(`[Harmonization API Error HTTP ${response.status}] Server response:`, errorText);
+    console.error(`[Harmonization API Error HTTP ${response.status}] Server response from ${activeUrl}:`, errorText);
     if (errorText.includes('<!DOCTYPE') || errorText.includes('<html')) {
       throw new Error(
-        `FastAPI backend returned HTML error at ${activeUrl} (Status ${response.status}). Ensure uvicorn is running.`
+        `FastAPI backend returned HTML error at ${activeUrl} (Status ${response.status}). Check backend logs.`
       );
     }
     throw new Error(`Harmonization failed (${response.status}): ${errorText}`);
@@ -171,7 +187,9 @@ export async function downloadHarmonizedCsv(params: HarmonizeParams): Promise<vo
     cluster_selection_epsilon: params.cluster_selection_epsilon ?? 0.5,
   };
 
-  const response = await fetch(`${API_BASE_URL}/api/export`, {
+  const exportUrl = `${API_BASE_URL}/api/export`;
+  console.log(`[FireSync API Fetch] Calling export: ${exportUrl}`);
+  const response = await fetch(exportUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -196,9 +214,11 @@ export async function downloadHarmonizedCsv(params: HarmonizeParams): Promise<vo
 /**
  * Checks FastAPI backend health and database readiness
  */
-export async function fetchHealthStatus(): Promise<{ status: string; records: number; engine: string }> {
+export async function fetchHealthStatus(): Promise<{ status: string; records: number; engine: string; is_empty?: boolean }> {
   const checkEndpoint = async (baseUrl: string) => {
-    const res = await fetch(`${baseUrl}/api/health`, { cache: 'no-store' });
+    const healthUrl = `${baseUrl}/api/health`;
+    console.log(`[FireSync API Fetch] Checking health: ${healthUrl}`);
+    const res = await fetch(healthUrl, { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   };
@@ -209,20 +229,42 @@ export async function fetchHealthStatus(): Promise<{ status: string; records: nu
       status: data.status,
       records: data.database_records,
       engine: data.clustering_engine,
+      is_empty: data.is_empty,
     };
   } catch (err: any) {
-    // Try alternate (localhost <-> 127.0.0.1) for Windows IPv4 binding
-    try {
-      const data = await checkEndpoint(ALTERNATE_API_BASE_URL);
-      return {
-        status: data.status,
-        records: data.database_records,
-        engine: data.clustering_engine,
-      };
-    } catch (altErr: any) {
-      console.error(`[FastAPI Health Check Offline] Could not reach ${API_BASE_URL}/api/health:`, altErr);
-      return { status: 'offline', records: 0, engine: 'unavailable' };
+    if (isLocalhost) {
+      try {
+        const data = await checkEndpoint(ALTERNATE_API_BASE_URL);
+        return {
+          status: data.status,
+          records: data.database_records,
+          engine: data.clustering_engine,
+          is_empty: data.is_empty,
+        };
+      } catch (altErr: any) {
+        console.error(`[FastAPI Health Check Offline] Could not reach ${API_BASE_URL}/api/health:`, altErr);
+        return { status: 'offline', records: 0, engine: 'unavailable', is_empty: true };
+      }
+    } else {
+      console.error(`[FastAPI Health Check Offline] Could not reach remote ${API_BASE_URL}/api/health:`, err);
+      return { status: 'offline', records: 0, engine: 'unavailable', is_empty: true };
     }
+  }
+}
+
+/**
+ * Diagnostic helper to check production database row counts (/api/db-status)
+ */
+export async function fetchDbStatus(): Promise<any> {
+  const dbStatusUrl = `${API_BASE_URL}/api/db-status`;
+  console.log(`[FireSync API Fetch] Checking DB status: ${dbStatusUrl}`);
+  try {
+    const res = await fetch(dbStatusUrl, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  } catch (err: any) {
+    console.error(`[FastAPI DB Status Check Failed] Could not reach ${dbStatusUrl}:`, err);
+    return null;
   }
 }
 
@@ -230,8 +272,10 @@ export async function fetchHealthStatus(): Promise<{ status: string; records: nu
  * Retrieves aggregate historical dataset statistics
  */
 export async function fetchStats(): Promise<BackendStats | null> {
+  const statsUrl = `${API_BASE_URL}/api/stats`;
+  console.log(`[FireSync API Fetch] Fetching statistics: ${statsUrl}`);
   try {
-    const res = await fetch(`${API_BASE_URL}/api/stats`, { cache: 'no-store' });
+    const res = await fetch(statsUrl, { cache: 'no-store' });
     if (!res.ok) return null;
     return res.json();
   } catch (err) {
