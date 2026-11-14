@@ -1,8 +1,10 @@
 import io
 import re
+import math
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, time as dtime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import httpx
 import pandas as pd
 from fastapi import HTTPException
@@ -275,29 +277,122 @@ class FirmsClient:
 
         return observations
 
+    @classmethod
+    def decompose_bbox(
+        cls,
+        bbox: BoundingBox,
+        max_tile_deg: float = 20.0,
+        max_tiles: int = 16,
+    ) -> Tuple[List[BoundingBox], Optional[str]]:
+        """
+        Decomposes a bounding box into valid NASA FIRMS Area API sub-queries:
+        1. Handles Antimeridian crossings (min_lon > max_lon) by splitting across +/-180°.
+        2. Tiles large boxes exceeding max_tile_deg into sub-tiles <= 20° x 20°.
+        3. Enforces concurrency caps (max_tiles) to protect against rate limits.
+        """
+        raw_boxes: List[Tuple[float, float, float, float]] = []
+
+        # Step 1: Check Antimeridian crossing (west > east)
+        if bbox.min_lon > bbox.max_lon:
+            # Box 1: [min_lon, min_lat, 180.0, max_lat]
+            raw_boxes.append((bbox.min_lon, bbox.min_lat, 180.0, bbox.max_lat))
+            # Box 2: [-180.0, min_lat, max_lon, max_lat]
+            raw_boxes.append((-180.0, bbox.min_lat, bbox.max_lon, bbox.max_lat))
+        else:
+            raw_boxes.append((bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat))
+
+        tiles: List[BoundingBox] = []
+        is_tiled = False
+        is_capped = False
+
+        for (w, s, e, n) in raw_boxes:
+            lon_span = abs(e - w)
+            lat_span = abs(n - s)
+
+            if lon_span <= max_tile_deg and lat_span <= max_tile_deg:
+                tiles.append(BoundingBox(min_lon=w, min_lat=s, max_lon=e, max_lat=n))
+            else:
+                is_tiled = True
+                n_lon = max(1, math.ceil(lon_span / max_tile_deg))
+                n_lat = max(1, math.ceil(lat_span / max_tile_deg))
+
+                # Cap tiling to max_tiles
+                if n_lon * n_lat > max_tiles:
+                    is_capped = True
+                    ratio = math.sqrt(max_tiles / (n_lon * n_lat))
+                    n_lon = max(1, int(n_lon * ratio))
+                    n_lat = max(1, int(n_lat * ratio))
+
+                d_lon = lon_span / n_lon
+                d_lat = lat_span / n_lat
+
+                for i in range(n_lon):
+                    tile_w = w + i * d_lon
+                    tile_e = e if i == n_lon - 1 else tile_w + d_lon
+                    for j in range(n_lat):
+                        tile_s = s + j * d_lat
+                        tile_n = n if j == n_lat - 1 else tile_s + d_lat
+                        tiles.append(
+                            BoundingBox(
+                                min_lon=round(tile_w, 4),
+                                min_lat=round(tile_s, 4),
+                                max_lon=round(tile_e, 4),
+                                max_lat=round(tile_n, 4),
+                            )
+                        )
+
+        warning: Optional[str] = None
+        if is_tiled or bbox.min_lon > bbox.max_lon:
+            if is_capped:
+                warning = (
+                    f"Large Area of Interest ({len(tiles)} sub-tiles): The requested query exceeded "
+                    f"the maximum single query footprint and was partitioned into {len(tiles)} tiles "
+                    f"capped for NASA FIRMS API rate limits."
+                )
+            elif bbox.min_lon > bbox.max_lon:
+                warning = (
+                    f"Antimeridian crossing detected ({bbox.min_lon}° to {bbox.max_lon}°): "
+                    f"Query was split into {len(tiles)} sub-tiles across the International Date Line."
+                )
+            else:
+                warning = (
+                    f"Large Area of Interest: Query footprint was partitioned into {len(tiles)} sub-tiles "
+                    f"(<= {max_tile_deg}°x{max_tile_deg}° each) to comply with NASA FIRMS Area API constraints."
+                )
+
+        return tiles, warning
+
     def fetch_area_observations(
         self,
         bbox: BoundingBox,
         day_range: int = 3,
         sources: Optional[List[str]] = None,
-    ) -> List[Observation]:
+    ) -> Tuple[List[Observation], Optional[str]]:
         """
         Queries the NASA FIRMS Area API for all active fire observations in the specified
         bounding box over the requested day range across MODIS and VIIRS satellite sensors.
+        Handles antimeridian crossings, large bounding box tiling (<= 20° x 20°),
+        parallel fetching across sensor-tile workers, and duplicate observation pruning.
+        Returns (observations, diagnostic_warning).
         """
         map_key = self._require_map_key()
         active_sources = sources or DEFAULT_FIRMS_SOURCES
         clamped_day_range = max(1, min(5, int(day_range)))
 
-        all_observations: List[Observation] = []
-        sensor_counts: Dict[str, int] = {}
+        tiles, warning = self.decompose_bbox(bbox)
+        if warning:
+            logger.warning(f"[FIRMS API Tiling] {warning}")
 
-        with httpx.Client(timeout=25.0) as client:
+        tasks: List[Tuple[str, BoundingBox]] = []
+        for tile in tiles:
             for source in active_sources:
-                url = self._build_url(map_key, source, bbox, clamped_day_range)
-                masked_url = mask_map_key(url)
-                logger.info(f"[FIRMS API] Querying {source}: {masked_url}")
+                tasks.append((source, tile))
 
+        def _fetch_single_task(source: str, tile: BoundingBox) -> List[Observation]:
+            url = self._build_url(map_key, source, tile, clamped_day_range)
+            masked_url = mask_map_key(url)
+            logger.info(f"[FIRMS API] Querying {source} tile [{tile.min_lon},{tile.min_lat},{tile.max_lon},{tile.max_lat}]: {masked_url}")
+            with httpx.Client(timeout=30.0) as client:
                 try:
                     resp = client.get(url)
                 except httpx.RequestError as exc:
@@ -318,19 +413,47 @@ class FirmsClient:
                     )
 
                 obs_list = self.parse_firms_csv_to_observations(resp.text, source)
-                sensor_counts[source] = len(obs_list)
-                logger.info(f"[FIRMS API] Sensor {source} returned {len(obs_list)} valid observations.")
-                all_observations.extend(obs_list)
+                logger.info(f"[FIRMS API] Sensor {source} tile returned {len(obs_list)} valid observations.")
+                return obs_list
 
-        modis_count = sum(1 for o in all_observations if o.instrument == "MODIS")
-        viirs_count = sum(1 for o in all_observations if o.instrument == "VIIRS")
+        all_observations: List[Observation] = []
+        max_workers = min(10, max(1, len(tasks)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_task = {
+                executor.submit(_fetch_single_task, s, t): (s, t)
+                for s, t in tasks
+            }
+            for future in as_completed(future_to_task):
+                try:
+                    obs_list = future.result()
+                    all_observations.extend(obs_list)
+                except Exception as exc:
+                    source, tile = future_to_task[future]
+                    logger.error(f"[FIRMS API Task Failed] {source} on tile: {exc}")
+                    raise
+
+        # Deduplicate overlapping detections across adjacent tiles
+        dedup_dict: Dict[Tuple[float, float, Any, str, str], Observation] = {}
+        for o in all_observations:
+            key = (
+                round(float(o.latitude), 4),
+                round(float(o.longitude), 4),
+                o.acq_datetime,
+                str(o.instrument).upper(),
+                str(o.satellite),
+            )
+            if key not in dedup_dict or (o.frp or 0.0) > (dedup_dict[key].frp or 0.0):
+                dedup_dict[key] = o
+
+        unique_observations = list(dedup_dict.values())
+        modis_count = sum(1 for o in unique_observations if o.instrument == "MODIS")
+        viirs_count = sum(1 for o in unique_observations if o.instrument == "VIIRS")
         logger.info(
-            f"[FIRMS API Aggregation] Completed live query: "
-            f"MODIS={modis_count}, VIIRS={viirs_count}, Total={len(all_observations)} "
-            f"across {len(active_sources)} sensor feeds."
+            f"[FIRMS API Aggregation] Completed query ({len(tiles)} tiles, {len(tasks)} requests): "
+            f"MODIS={modis_count}, VIIRS={viirs_count}, Unique Total={len(unique_observations)}."
         )
 
-        return all_observations
+        return unique_observations, warning
 
     def health_check_live(self) -> Dict[str, Any]:
         """

@@ -146,3 +146,30 @@ def test_empty_dataset_handling():
     assert response.summary.total_clusters == 0
     assert response.summary.total_observations == 0
     assert len(response.clusters) == 0
+
+
+def test_southern_hemisphere_and_antimeridian_projection():
+    """Verify metric projection handles southern hemisphere and antimeridian wrapping accurately."""
+    from app.services.clustering import angular_mean_deg
+    engine = SpatioTemporalClusteringEngine()
+
+    # 1. Antimeridian wrapping: 179.5°E and -179.5°W should be ~1 degree (not 359 degrees) apart
+    lats = np.array([-30.0, -30.0])
+    lons = np.array([179.5, -179.5])
+    dts = [datetime(2026, 11, 14, 10, 0), datetime(2026, 11, 14, 10, 0)]
+
+    x_km, y_km, _ = engine._project_coordinates(lats, lons, dts)
+    delta_x = abs(x_km[1] - x_km[0])
+
+    # 1° at 30° latitude is approx 111 * cos(30°) ≈ 96 km
+    assert 90.0 < delta_x < 105.0
+
+    # 2. Angular mean of 179° and -179° is 180° / -180°
+    mean_deg = angular_mean_deg(np.array([179.0, -179.0]))
+    assert abs(abs(mean_deg) - 180.0) < 0.01
+
+    # 3. Southern hemisphere latitude delta: 1° at -35° should be ~111 km
+    lats_sh = np.array([-35.0, -34.0])
+    lons_sh = np.array([150.0, 150.0])
+    _, y_sh, _ = engine._project_coordinates(lats_sh, lons_sh, dts)
+    assert 110.0 < abs(y_sh[1] - y_sh[0]) < 112.5

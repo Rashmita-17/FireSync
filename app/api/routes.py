@@ -45,13 +45,12 @@ def _query_filtered_observations(
     lons = [bbox.min_lon, bbox.max_lon]
 
     # Latitude cannot exceed [-90, 90] in EPSG:4326
-    if any(abs(l) > 90.0 for l in lats):
-        lats, lons = lons, lats
-    elif all(l < 0 for l in lats) and all(l > 0 for l in lons):
+    if any(abs(l) > 90.0 for l in lats) and all(abs(l) <= 90.0 for l in lons):
         lats, lons = lons, lats
 
     lat_min, lat_max = min(lats), max(lats)
-    lon_min, lon_max = min(lons), max(lons)
+    lon_west, lon_east = lons[0], lons[1]
+    is_antimeridian = (lon_west > lon_east) and (lon_west - lon_east) > 180.0
 
     # 2. Sanitize confidence threshold
     conf_val = float(min_confidence) if isinstance(min_confidence, (int, float)) else 0.0
@@ -60,10 +59,16 @@ def _query_filtered_observations(
     spatial_filters = [
         Observation.latitude >= lat_min,
         Observation.latitude <= lat_max,
-        Observation.longitude >= lon_min,
-        Observation.longitude <= lon_max,
         Observation.confidence >= conf_val,
     ]
+
+    if is_antimeridian:
+        spatial_filters.append(
+            (Observation.longitude >= lon_west) | (Observation.longitude <= lon_east)
+        )
+    else:
+        spatial_filters.append(Observation.longitude >= min(lon_west, lon_east))
+        spatial_filters.append(Observation.longitude <= max(lon_west, lon_east))
 
     # If the model has a PostGIS geometry column, apply ST_MakeEnvelope in (Lon, Lat) order:
     # PostGIS convention: ST_MakeEnvelope(xmin, ymin, xmax, ymax, srid) -> (lon_min, lat_min, lon_max, lat_max, 4326)
@@ -323,14 +328,6 @@ def harmonize_get(
     """
     bbox = BoundingBox(min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat)
     
-    observations = _query_filtered_observations(
-        db=db,
-        bbox=bbox,
-        start_datetime=start_datetime,
-        end_datetime=end_datetime,
-        min_confidence=min_confidence,
-    )
-
     # Parameter sanitization for direct Python invocations
     d_range = day_range if isinstance(day_range, (int, float)) else 3
     is_live = use_live if isinstance(use_live, bool) else False
@@ -342,11 +339,23 @@ def harmonize_get(
     inc_obs = include_observations if isinstance(include_observations, bool) else False
     inc_noise = include_noise if isinstance(include_noise, bool) else False
 
+    if is_live:
+        observations = []
+    else:
+        observations = _query_filtered_observations(
+            db=db,
+            bbox=bbox,
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+            min_confidence=min_confidence,
+        )
+
     # If database is empty for this AOI or live query is requested, fetch directly from NASA FIRMS Area API
+    warning_message: Optional[str] = None
     if (len(observations) == 0 or is_live) and settings.get_map_key():
         clamped_days = max(1, min(5, int(d_range)))
         logger.info(f"[Harmonize GET] Database has {len(observations)} records in AOI. Querying live NASA FIRMS API (day_range={clamped_days})...")
-        live_obs = firms_client.fetch_area_observations(bbox=bbox, day_range=clamped_days)
+        live_obs, warning_message = firms_client.fetch_area_observations(bbox=bbox, day_range=clamped_days)
         if live_obs:
             observations = live_obs
             try:
@@ -373,6 +382,7 @@ def harmonize_get(
         query_bbox=bbox,
         include_observations=inc_obs,
         include_noise=inc_noise,
+        warning=warning_message,
     )
 
     logger.info(
@@ -396,20 +406,24 @@ def harmonize_post(
     Spatio-Temporal Harmonization endpoint accepting a structured JSON payload with
     bounding box, temporal filters, and HDBSCAN hyperparameters.
     """
-    observations = _query_filtered_observations(
-        db=db,
-        bbox=payload.bbox,
-        start_datetime=payload.start_datetime,
-        end_datetime=payload.end_datetime,
-        instruments=payload.instruments,
-        min_confidence=payload.min_confidence,
-    )
+    if payload.use_live:
+        observations = []
+    else:
+        observations = _query_filtered_observations(
+            db=db,
+            bbox=payload.bbox,
+            start_datetime=payload.start_datetime,
+            end_datetime=payload.end_datetime,
+            instruments=payload.instruments,
+            min_confidence=payload.min_confidence,
+        )
 
     # If database is empty for this AOI or live query is requested, fetch directly from NASA FIRMS Area API
+    warning_message: Optional[str] = None
     if (len(observations) == 0 or payload.use_live) and settings.get_map_key():
         clamped_days = max(1, min(5, int(payload.day_range or 3)))
         logger.info(f"[Harmonize POST] Database has {len(observations)} records in AOI. Querying live NASA FIRMS API (day_range={clamped_days})...")
-        live_obs = firms_client.fetch_area_observations(bbox=payload.bbox, day_range=clamped_days)
+        live_obs, warning_message = firms_client.fetch_area_observations(bbox=payload.bbox, day_range=clamped_days)
         if live_obs:
             observations = live_obs
             try:
@@ -436,6 +450,7 @@ def harmonize_post(
         query_bbox=payload.bbox,
         include_observations=payload.include_observations,
         include_noise=payload.include_noise,
+        warning=warning_message,
     )
 
     logger.info(
@@ -480,7 +495,7 @@ def export_harmonized_csv_get(
     )
 
     if len(observations) == 0 and settings.get_map_key():
-        live_obs = firms_client.fetch_area_observations(bbox=bbox, day_range=3)
+        live_obs, _ = firms_client.fetch_area_observations(bbox=bbox, day_range=3)
         if live_obs:
             observations = live_obs
             try:
@@ -541,7 +556,7 @@ def export_harmonized_csv_post(
     )
 
     if len(observations) == 0 and settings.get_map_key():
-        live_obs = firms_client.fetch_area_observations(bbox=payload.bbox, day_range=payload.day_range or 3)
+        live_obs, _ = firms_client.fetch_area_observations(bbox=payload.bbox, day_range=payload.day_range or 3)
         if live_obs:
             observations = live_obs
             try:
@@ -612,12 +627,19 @@ def get_raw_observations(
     bbox = BoundingBox(min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat)
     inst_list = [instrument] if instrument else None
     
+    if bbox.min_lon > bbox.max_lon:
+        lon_filter = (Observation.longitude >= bbox.min_lon) | (Observation.longitude <= bbox.max_lon)
+    else:
+        lon_filter = and_(
+            Observation.longitude >= bbox.min_lon,
+            Observation.longitude <= bbox.max_lon,
+        )
+
     query = db.query(Observation).filter(
         and_(
             Observation.latitude >= bbox.min_lat,
             Observation.latitude <= bbox.max_lat,
-            Observation.longitude >= bbox.min_lon,
-            Observation.longitude <= bbox.max_lon,
+            lon_filter,
         )
     )
     if inst_list:

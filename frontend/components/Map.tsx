@@ -365,6 +365,8 @@ export default function DisasterMap({
       style: DEFAULT_DARK_STYLE,
       center: initialCenter,
       zoom: 7,
+      minZoom: 1,
+      maxZoom: 19,
       attributionControl: false,
     });
 
@@ -540,26 +542,63 @@ export default function DisasterMap({
     const renderBbox = () => {
       if (!map.isStyleLoaded()) return;
 
+      const features: GeoJSON.Feature[] = [];
+      if (bbox.min_lon > bbox.max_lon) {
+        // Antimeridian crossing: split into two visual polygons across +/-180°
+        features.push({
+          type: 'Feature',
+          geometry: {
+            type: 'Polygon',
+            coordinates: [
+              [
+                [bbox.min_lon, bbox.min_lat],
+                [180, bbox.min_lat],
+                [180, bbox.max_lat],
+                [bbox.min_lon, bbox.max_lat],
+                [bbox.min_lon, bbox.min_lat],
+              ],
+            ],
+          },
+          properties: {},
+        });
+        features.push({
+          type: 'Feature',
+          geometry: {
+            type: 'Polygon',
+            coordinates: [
+              [
+                [-180, bbox.min_lat],
+                [bbox.max_lon, bbox.min_lat],
+                [bbox.max_lon, bbox.max_lat],
+                [-180, bbox.max_lat],
+                [-180, bbox.min_lat],
+              ],
+            ],
+          },
+          properties: {},
+        });
+      } else {
+        features.push({
+          type: 'Feature',
+          geometry: {
+            type: 'Polygon',
+            coordinates: [
+              [
+                [bbox.min_lon, bbox.min_lat],
+                [bbox.max_lon, bbox.min_lat],
+                [bbox.max_lon, bbox.max_lat],
+                [bbox.min_lon, bbox.max_lat],
+                [bbox.min_lon, bbox.min_lat],
+              ],
+            ],
+          },
+          properties: {},
+        });
+      }
+
       const bboxGeoJson: GeoJSON.FeatureCollection = {
         type: 'FeatureCollection',
-        features: [
-          {
-            type: 'Feature',
-            geometry: {
-              type: 'Polygon',
-              coordinates: [
-                [
-                  [bbox.min_lon, bbox.min_lat],
-                  [bbox.max_lon, bbox.min_lat],
-                  [bbox.max_lon, bbox.max_lat],
-                  [bbox.min_lon, bbox.max_lat],
-                  [bbox.min_lon, bbox.min_lat],
-                ],
-              ],
-            },
-            properties: {},
-          },
-        ],
+        features,
       };
 
       safeUpdateGeoJsonSource(map, 'bbox-source', bboxGeoJson);
@@ -1315,13 +1354,23 @@ export default function DisasterMap({
   const fitToQueryBounds = useCallback(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
-    map.fitBounds(
-      [
-        [bbox.min_lon, bbox.min_lat],
-        [bbox.max_lon, bbox.max_lat],
-      ],
-      { padding: 30 }
-    );
+    if (bbox.min_lon > bbox.max_lon) {
+      map.fitBounds(
+        [
+          [-180, bbox.min_lat],
+          [180, bbox.max_lat],
+        ],
+        { padding: 30 }
+      );
+    } else {
+      map.fitBounds(
+        [
+          [bbox.min_lon, bbox.min_lat],
+          [bbox.max_lon, bbox.max_lat],
+        ],
+        { padding: 30 }
+      );
+    }
   }, [bbox]);
 
   return (

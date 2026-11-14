@@ -21,6 +21,22 @@ from app.schemas.observation import ObservationResponse
 EARTH_RADIUS_KM = 6371.0088
 
 
+def angular_mean_deg(degrees: np.ndarray, weights: Optional[np.ndarray] = None) -> float:
+    """
+    Computes circular mean of geographic angles in degrees.
+    Accurately handles the antimeridian / International Date Line (-180° / +180°) circular wrap.
+    """
+    rad = np.radians(degrees)
+    if weights is not None and np.sum(weights) > 0:
+        sin_sum = float(np.sum(np.sin(rad) * weights))
+        cos_sum = float(np.sum(np.cos(rad) * weights))
+    else:
+        sin_sum = float(np.sum(np.sin(rad)))
+        cos_sum = float(np.sum(np.cos(rad)))
+    mean_rad = math.atan2(sin_sum, cos_sum)
+    return float(np.degrees(mean_rad))
+
+
 class SpatioTemporalClusteringEngine:
     """
     Spatio-Temporal Harmonization Engine for Multi-Sensor Satellite Data (MODIS & VIIRS).
@@ -57,19 +73,22 @@ class SpatioTemporalClusteringEngine:
         """
         Projects spherical WGS84 geographic coordinates and timestamps to metric Cartesian space:
         - x_km, y_km: Local metric equirectangular planar projection centered at region centroid
+          with longitudinal wrap handling across the antimeridian (-180 / +180) and worldwide latitude scaling.
         - t_hours: Elapsed hours from earliest detection
         """
-        lat_center = np.mean(lats)
-        lon_center = np.mean(lons)
-        
-        lat_rad = np.radians(lats)
-        lon_rad = np.radians(lons)
-        lat_center_rad = math.radians(lat_center)
-        lon_center_rad = math.radians(lon_center)
+        lat_center = float(np.mean(lats))
+        lon_center = angular_mean_deg(lons)
 
-        # Planar equirectangular projection centered at region centroid
-        x_km = EARTH_RADIUS_KM * (lon_rad - lon_center_rad) * math.cos(lat_center_rad)
-        y_km = EARTH_RADIUS_KM * (lat_rad - lat_center_rad)
+        # Longitudinal difference wrapped around circle [-180, 180]
+        dlon_deg = ((lons - lon_center + 180.0) % 360.0) - 180.0
+        dlon_rad = np.radians(dlon_deg)
+        dlat_rad = np.radians(lats - lat_center)
+        lat_center_rad = math.radians(lat_center)
+
+        # Planar projection centered at region centroid
+        # Works worldwide: cos(-lat) == cos(lat) ensures correct scaling in southern hemisphere
+        x_km = EARTH_RADIUS_KM * dlon_rad * math.cos(lat_center_rad)
+        y_km = EARTH_RADIUS_KM * dlat_rad
 
         # Temporal dimension in hours
         t0 = min(datetimes)
@@ -133,11 +152,11 @@ class SpatioTemporalClusteringEngine:
                 pass
 
         # For 1-2 points or collinear geometries, represent as Point or small footprint
-        centroid_lon = float(np.mean(cluster_lons))
+        centroid_lon = angular_mean_deg(cluster_lons)
         centroid_lat = float(np.mean(cluster_lats))
         geojson = {
             "type": "Point",
-            "coordinates": [centroid_lon, centroid_lat]
+            "coordinates": [round(centroid_lon, 6), round(centroid_lat, 6)]
         }
         return float(pixel_nominal_area_km2), geojson
 
@@ -147,6 +166,7 @@ class SpatioTemporalClusteringEngine:
         query_bbox: BoundingBox,
         include_observations: bool = False,
         include_noise: bool = False,
+        warning: Optional[str] = None,
     ) -> HarmonizationResponse:
         """
         Main pipeline: Ingests observation objects, runs spatio-temporal HDBSCAN,
@@ -173,6 +193,7 @@ class SpatioTemporalClusteringEngine:
                 ),
                 clusters=[],
                 noise_points=[] if include_noise else None,
+                warning=warning,
             )
 
         # Convert to working numpy / pandas vectors for vectorized computation
@@ -271,7 +292,7 @@ class SpatioTemporalClusteringEngine:
 
             # Centroids
             mean_lat = float(cluster_df["latitude"].mean())
-            mean_lon = float(cluster_df["longitude"].mean())
+            mean_lon = angular_mean_deg(cluster_df["longitude"].to_numpy())
             
             # Weighted Centroid (weighted by FRP and confidence)
             # Detections with higher energy and confidence have higher spatial certainty
@@ -279,7 +300,7 @@ class SpatioTemporalClusteringEngine:
             w_sum = weights.sum()
             if w_sum > 0:
                 weighted_lat = float(np.sum(cluster_df["latitude"].to_numpy() * weights) / w_sum)
-                weighted_lon = float(np.sum(cluster_df["longitude"].to_numpy() * weights) / w_sum)
+                weighted_lon = angular_mean_deg(cluster_df["longitude"].to_numpy(), weights=weights)
             else:
                 weighted_lat = mean_lat
                 weighted_lon = mean_lon
@@ -396,4 +417,5 @@ class SpatioTemporalClusteringEngine:
             summary=summary,
             clusters=clusters,
             noise_points=noise_points_list,
+            warning=warning,
         )

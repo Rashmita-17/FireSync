@@ -24,8 +24,15 @@ class BoundingBox(BaseModel):
             for k in ["min_lon", "max_lon"]:
                 if k in data and isinstance(data[k], (int, float)):
                     lon = float(data[k])
-                    wrapped = ((((lon + 180.0) % 360.0) + 360.0) % 360.0) - 180.0
-                    data[k] = round(wrapped, 4)
+                    if lon == 180.0:
+                        data[k] = 180.0
+                    elif lon == -180.0:
+                        data[k] = -180.0
+                    else:
+                        wrapped = ((((lon + 180.0) % 360.0) + 360.0) % 360.0) - 180.0
+                        if wrapped == -180.0 and lon > 0:
+                            wrapped = 180.0
+                        data[k] = round(wrapped, 4)
             for k in ["min_lat", "max_lat"]:
                 if k in data and isinstance(data[k], (int, float)):
                     lat = float(data[k])
@@ -38,18 +45,27 @@ class BoundingBox(BaseModel):
         lats = [self.min_lat, self.max_lat]
         lons = [self.min_lon, self.max_lon]
 
-        # Latitude cannot exceed [-90, 90] in EPSG:4326
-        if any(abs(l) > 90.0 for l in lats):
-            lats, lons = lons, lats
-        # In North America / Western Sector, longitudes are negative and latitudes are positive
-        elif all(l < 0 for l in lats) and all(l > 0 for l in lons):
+        # Latitude cannot exceed [-90, 90] in EPSG:4326.
+        # If user passed coordinates in [lat, lon] order where lon was > 90, swap them.
+        if any(abs(l) > 90.0 for l in lats) and all(abs(l) <= 90.0 for l in lons):
             lats, lons = lons, lats
 
-        # Normalize min and max bounds to prevent 422 errors when drawn right-to-left or top-to-bottom
+        # Normalize latitude boundaries strictly South <= North
         self.min_lat = float(min(lats))
         self.max_lat = float(max(lats))
-        self.min_lon = float(min(lons))
-        self.max_lon = float(max(lons))
+
+        # Longitude validation:
+        # Note: When min_lon > max_lon, this represents an antimeridian-crossing bounding box
+        # (e.g. 170°E to 170°W). Only sort min/max if not crossing the antimeridian.
+        # If drawn right-to-left by accident on non-antimeridian boxes (|lon1 - lon2| < 180), order them.
+        lon1, lon2 = float(lons[0]), float(lons[1])
+        if lon1 > lon2 and (lon1 - lon2) < 180.0:
+            self.min_lon = lon2
+            self.max_lon = lon1
+        else:
+            self.min_lon = lon1
+            self.max_lon = lon2
+
         return self
 
 
@@ -186,4 +202,5 @@ class HarmonizationResponse(BaseModel):
     summary: HarmonizationSummary
     clusters: List[HarmonizedCluster]
     noise_points: Optional[List[ObservationResponse]] = None
+    warning: Optional[str] = Field(None, description="Diagnostic warning if box was tiled, clamped, or truncated")
 
