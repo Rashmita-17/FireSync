@@ -21,7 +21,8 @@ export function resolveApiBaseUrl(): string {
     }
     return cleanUrl;
   }
-  return 'http://localhost:8000';
+  // Default to 127.0.0.1 on local environments to bypass Windows IPv6 resolution latency
+  return 'http://127.0.0.1:8000';
 }
 
 export const API_BASE_URL = resolveApiBaseUrl();
@@ -86,6 +87,7 @@ export interface HarmonizeParams {
   min_confidence?: number;
   include_observations?: boolean;
   include_noise?: boolean;
+  signal?: AbortSignal;
 }
 
 /**
@@ -120,10 +122,11 @@ export function normalizeBoundingBox(bbox: BoundingBox): BoundingBox {
 }
 
 export const DEFAULT_FETCH_TIMEOUT_MS = 8000;
+export const HARMONIZATION_TIMEOUT_MS = 20000;
 
 /**
- * Executes a browser fetch with a strict abort timeout.
- * Prevents hanging connections on spin-up delays or sleeping cloud instances.
+ * Executes a browser fetch with an abort timeout and supports external cancellation signals.
+ * Prevents hanging connections on cold start delays while allowing heavy HDBSCAN calculations.
  */
 export async function fetchWithTimeout(
   url: string,
@@ -135,6 +138,15 @@ export async function fetchWithTimeout(
     controller.abort();
   }, timeoutMs);
 
+  // Link external abort signal if provided (e.g. superseding previous harmonization requests)
+  if (options.signal) {
+    if (options.signal.aborted) {
+      controller.abort();
+    } else {
+      options.signal.addEventListener('abort', () => controller.abort());
+    }
+  }
+
   try {
     const response = await fetch(url, {
       ...options,
@@ -143,7 +155,10 @@ export async function fetchWithTimeout(
     return response;
   } catch (err: any) {
     if (err?.name === 'AbortError' || controller.signal.aborted) {
-      throw new Error(`Request timed out after ${timeoutMs / 1000}s (backend unreachable or cold start)`);
+      if (options.signal?.aborted) {
+        throw new Error('Request aborted (superseded by newer query)');
+      }
+      throw new Error(`Request timed out after ${timeoutMs / 1000}s (backend unreachable or heavy clustering)`);
     }
     throw err;
   } finally {
@@ -198,8 +213,9 @@ export async function fetchHarmonizedData(params: HarmonizeParams): Promise<Harm
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        signal: params.signal,
       },
-      DEFAULT_FETCH_TIMEOUT_MS
+      HARMONIZATION_TIMEOUT_MS
     );
   };
 
@@ -334,7 +350,7 @@ export async function downloadHarmonizedCsv(params: HarmonizeParams): Promise<vo
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     },
-    DEFAULT_FETCH_TIMEOUT_MS
+    HARMONIZATION_TIMEOUT_MS
   );
 
   if (!response.ok) {

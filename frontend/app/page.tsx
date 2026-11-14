@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Header from '@/components/Header';
 import ControlPanel from '@/components/ControlPanel';
 import MapWrapper from '@/components/MapWrapper';
@@ -45,9 +45,19 @@ export default function DisasterResponseDashboard() {
   const [totalDbRecords, setTotalDbRecords] = useState(0);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
 
+  // Tracks active in-flight harmonization to cancel superseded requests
+  const activeHarmonizeAbortRef = useRef<AbortController | null>(null);
+
   // Harmonize function
   const executeHarmonization = useCallback(
     async (overrideParams?: Partial<HarmonizeParams>) => {
+      // Abort any previous pending harmonization query
+      if (activeHarmonizeAbortRef.current) {
+        activeHarmonizeAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      activeHarmonizeAbortRef.current = controller;
+
       setLoading(true);
       setErrorNotice(null);
 
@@ -64,9 +74,12 @@ export default function DisasterResponseDashboard() {
           min_confidence: overrideParams?.min_confidence ?? 0.0,
           include_observations: true,
           include_noise: true,
+          signal: controller.signal,
         };
 
         const result = await fetchHarmonizedData(queryParams);
+        if (controller.signal.aborted) return;
+
         const safeClusters = Array.isArray(result?.clusters) ? result.clusters : [];
         setClusters([...safeClusters]);
         setSummary(
@@ -87,6 +100,11 @@ export default function DisasterResponseDashboard() {
         );
         setNoisePoints(Array.isArray(result?.noise_points) ? [...result.noise_points] : []);
       } catch (err: any) {
+        // If superseded by a newer query or manually aborted, silently ignore
+        if (controller.signal.aborted || err?.message?.includes('aborted')) {
+          return;
+        }
+
         console.error('[Dashboard Error] Failed to harmonize AOI bounding box:', {
           error: err,
           message: err.message,
@@ -110,7 +128,9 @@ export default function DisasterResponseDashboard() {
         setNoisePoints([]);
         setErrorNotice(err.message || 'Failed to connect to FastAPI /api/harmonize endpoint');
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
       }
     },
     [bbox]
