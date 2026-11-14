@@ -45,12 +45,13 @@ def ingest_global_fire_datasets(
     reports: List[IngestionReport] = []
     db = SessionLocal()
     try:
-        # Purge legacy synthetic records from sample_modis_viirs_data.csv if present
-        legacy_count = db.query(Observation).filter(Observation.source_file == "sample_modis_viirs_data.csv").count()
-        if legacy_count > 0:
-            logger.info(f"Purging {legacy_count} legacy records from 'sample_modis_viirs_data.csv'...")
-            db.query(Observation).filter(Observation.source_file == "sample_modis_viirs_data.csv").delete(synchronize_session=False)
-            db.commit()
+        # Only purge legacy synthetic records if explicit force re-ingestion is requested
+        if force:
+            legacy_count = db.query(Observation).filter(Observation.source_file == "sample_modis_viirs_data.csv").count()
+            if legacy_count > 0:
+                logger.info(f"Purging {legacy_count} legacy records from 'sample_modis_viirs_data.csv'...")
+                db.query(Observation).filter(Observation.source_file == "sample_modis_viirs_data.csv").delete(synchronize_session=False)
+                db.commit()
 
         for filename in files_to_process:
             csv_path = target_dir / filename
@@ -96,17 +97,23 @@ def ingest_global_fire_datasets(
     return reports
 
 
+import threading
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Application lifespan context manager:
-    Initializes database schema and automatically checks/ingests target global fire datasets.
+    Initializes database schema and automatically checks/ingests target global fire datasets
+    in a background thread so the server starts serving requests immediately.
     """
     init_db()
-    try:
-        ingest_global_fire_datasets()
-    except Exception as e:
-        logger.warning(f"Startup global dataset ingestion check skipped or deferred: {e}")
+    def _background_ingest():
+        try:
+            ingest_global_fire_datasets()
+        except Exception as e:
+            logger.warning(f"Startup global dataset ingestion check skipped or deferred: {e}")
+
+    threading.Thread(target=_background_ingest, daemon=True).start()
     yield
 
 

@@ -221,15 +221,30 @@ class SpatioTemporalClusteringEngine:
             # synthesize them into an active fire event cluster rather than discarding as zero events.
             labels = np.zeros(len(df), dtype=int)
         else:
-            hdbscan = HDBSCAN(
-                min_cluster_size=self.min_cluster_size,
-                min_samples=self.min_samples,
-                metric="euclidean",
-                cluster_selection_epsilon=self.cluster_selection_epsilon,
-                allow_single_cluster=True,
-                copy=True,
-            )
-            labels = hdbscan.fit_predict(X)
+            try:
+                hdbscan = HDBSCAN(
+                    min_cluster_size=self.min_cluster_size,
+                    min_samples=self.min_samples,
+                    metric="euclidean",
+                    cluster_selection_epsilon=self.cluster_selection_epsilon,
+                    allow_single_cluster=True,
+                    copy=True,
+                )
+                labels = hdbscan.fit_predict(X)
+            except (TypeError, ValueError) as err:
+                if "only 0-dimensional arrays can be converted to Python scalars" in str(err):
+                    # Compatibility fallback for scikit-learn 1.9+ Cython epsilon_search on numpy 2.x
+                    hdbscan = HDBSCAN(
+                        min_cluster_size=self.min_cluster_size,
+                        min_samples=self.min_samples,
+                        metric="euclidean",
+                        cluster_selection_epsilon=0.0,
+                        allow_single_cluster=True,
+                        copy=True,
+                    )
+                    labels = hdbscan.fit_predict(X)
+                else:
+                    raise
 
         df["cluster_label"] = labels
 
