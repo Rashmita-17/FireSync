@@ -3,9 +3,11 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import MapboxDraw from '@mapbox/mapbox-gl-draw';
+import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import { BoundingBox, HarmonizedCluster, RawObservation } from '@/types/fire';
 import { normalizeBoundingBox } from '@/utils/api';
-import { Maximize2, Crosshair, Flame, Radio } from 'lucide-react';
+import { Maximize2, Crosshair, Flame, Radio, Pentagon } from 'lucide-react';
 
 interface MapProps {
   bbox: BoundingBox;
@@ -184,6 +186,111 @@ function generateCirclePolygon(
   return coords;
 }
 
+// Ensure MapboxDraw uses MapLibre's canvas and control classes
+if (typeof window !== 'undefined' && MapboxDraw && (MapboxDraw as any).constants?.classes) {
+  try {
+    const classes = (MapboxDraw as any).constants.classes;
+    classes.CANVAS = 'maplibregl-canvas';
+    classes.CONTROL_BASE = 'maplibregl-ctrl';
+    classes.CONTROL_PREFIX = 'maplibregl-ctrl-';
+    classes.CONTROL_GROUP = 'maplibregl-ctrl-group';
+    classes.ATTRIBUTION = 'maplibregl-ctrl-attrib';
+  } catch {}
+}
+
+// MapLibre-compatible theme for Mapbox GL Draw
+// Eliminates data-driven `line-dasharray: ['case', ...]` which causes MapLibre to reject and drop the line layer!
+export const MAPLIBRE_COMPATIBLE_DRAW_THEME = [
+  // Polygon fill
+  {
+    id: 'gl-draw-polygon-fill',
+    type: 'fill',
+    filter: ['all', ['==', '$type', 'Polygon']],
+    paint: {
+      'fill-color': '#06B6D4',
+      'fill-opacity': 0.22,
+    },
+  },
+  // Active and inactive lines: solid high-visibility neon cyan lines without buggy conditional line-dasharray
+  {
+    id: 'gl-draw-lines',
+    type: 'line',
+    filter: ['any', ['==', '$type', 'LineString'], ['==', '$type', 'Polygon']],
+    layout: {
+      'line-cap': 'round',
+      'line-join': 'round',
+    },
+    paint: {
+      'line-color': '#22D3EE',
+      'line-width': 3,
+    },
+  },
+  // Active Line highlight
+  {
+    id: 'gl-draw-lines-active',
+    type: 'line',
+    filter: ['all', ['==', '$type', 'LineString'], ['==', 'active', 'true']],
+    layout: {
+      'line-cap': 'round',
+      'line-join': 'round',
+    },
+    paint: {
+      'line-color': '#38BDF8',
+      'line-width': 3.5,
+    },
+  },
+  // Point feature halo
+  {
+    id: 'gl-draw-point-outer',
+    type: 'circle',
+    filter: ['all', ['==', '$type', 'Point'], ['==', 'meta', 'feature']],
+    paint: {
+      'circle-radius': 7,
+      'circle-color': '#FFFFFF',
+    },
+  },
+  // Point feature center
+  {
+    id: 'gl-draw-point-inner',
+    type: 'circle',
+    filter: ['all', ['==', '$type', 'Point'], ['==', 'meta', 'feature']],
+    paint: {
+      'circle-radius': 5,
+      'circle-color': '#06B6D4',
+    },
+  },
+  // Vertex handle outer
+  {
+    id: 'gl-draw-vertex-outer',
+    type: 'circle',
+    filter: ['all', ['==', '$type', 'Point'], ['==', 'meta', 'vertex'], ['!=', 'mode', 'simple_select']],
+    paint: {
+      'circle-radius': 7,
+      'circle-color': '#FFFFFF',
+    },
+  },
+  // Vertex handle inner
+  {
+    id: 'gl-draw-vertex-inner',
+    type: 'circle',
+    filter: ['all', ['==', '$type', 'Point'], ['==', 'meta', 'vertex'], ['!=', 'mode', 'simple_select']],
+    paint: {
+      'circle-radius': 5,
+      'circle-color': '#0891B2',
+    },
+  },
+  // Midpoint handle
+  {
+    id: 'gl-draw-midpoint',
+    type: 'circle',
+    filter: ['all', ['==', 'meta', 'midpoint']],
+    paint: {
+      'circle-radius': 4,
+      'circle-color': '#F59E0B',
+    },
+  },
+];
+
 export default function DisasterMap({
   bbox,
   clusters,
@@ -202,11 +309,24 @@ export default function DisasterMap({
 
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<maplibregl.Map | null>(null);
+  const drawRef = useRef<MapboxDraw | null>(null);
   const markersRef = useRef<maplibregl.Marker[]>([]);
   const hoverPopupRef = useRef<maplibregl.Popup | null>(null);
   const currentThemeRef = useRef<'dark' | 'satellite' | 'streets'>('dark');
 
-  const [isDrawing, setIsDrawing] = useState(false);
+  const [drawingMode, setDrawingMode] = useState<'none' | 'box' | 'polygon'>('none');
+  const [boxDrawCorner, setBoxDrawCorner] = useState<{ lng: number; lat: number } | null>(null);
+  const [screenBox, setScreenBox] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+    minLat: number;
+    maxLat: number;
+    minLon: number;
+    maxLon: number;
+  } | null>(null);
+  const isDrawing = drawingMode !== 'none';
   const [mapTileTheme, setMapTileTheme] = useState<'dark' | 'satellite' | 'streets'>('dark');
   const [styleEpoch, setStyleEpoch] = useState(0);
 
@@ -257,13 +377,75 @@ export default function DisasterMap({
       'bottom-right'
     );
 
+    // Initialize Mapbox GL Draw control with MapLibre-compatible theme (no expression line-dasharray)
+    const draw = new MapboxDraw({
+      displayControlsDefault: false,
+      controls: {
+        polygon: true,
+        trash: true,
+      },
+      defaultMode: 'simple_select',
+      styles: MAPLIBRE_COMPATIBLE_DRAW_THEME,
+    });
+    drawRef.current = draw;
+
+    // Hook draw control into MapLibre instance defensively (without throwing React/Turbopack error)
+    try {
+      map.addControl(draw as unknown as maplibregl.IControl, 'top-left');
+    } catch (drawErr) {
+      console.warn('[MapboxDraw] Could not add draw control to MapLibre:', drawErr);
+    }
+
+    // Handle polygon creation/updates from Mapbox Draw
+    const handleDrawGeometry = (e: any) => {
+      try {
+        const feature = e?.features?.[0];
+        if (feature?.geometry?.type === 'Polygon') {
+          const coords: [number, number][] = feature.geometry.coordinates[0];
+          if (Array.isArray(coords) && coords.length >= 3) {
+            let minLon = 180, maxLon = -180, minLat = 90, maxLat = -90;
+            for (const [lon, lat] of coords) {
+              if (lon < minLon) minLon = lon;
+              if (lon > maxLon) maxLon = lon;
+              if (lat < minLat) minLat = lat;
+              if (lat > maxLat) maxLat = lat;
+            }
+            if (Math.abs(maxLat - minLat) > 0.005 && Math.abs(maxLon - minLon) > 0.005) {
+              const newBbox: BoundingBox = {
+                min_lat: minLat,
+                max_lat: maxLat,
+                min_lon: minLon,
+                max_lon: maxLon,
+              };
+              onBoundsChange(normalizeBoundingBox(newBbox));
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[MapboxDraw] Error processing geometry:', err);
+      } finally {
+        setDrawingMode('none');
+      }
+    };
+
+    (map as any).on('draw.create', handleDrawGeometry);
+    (map as any).on('draw.update', handleDrawGeometry);
+    (map as any).on('draw.modechange', (e: any) => {
+      const isPolygon = Boolean(e?.mode && e.mode.startsWith('draw_'));
+      setDrawingMode((prev) => (isPolygon ? 'polygon' : prev === 'polygon' ? 'none' : prev));
+    });
+
     map.on('load', () => {
       map.resize();
+      map.getCanvas().classList.add('mapboxgl-canvas');
+      map.getContainer().classList.add('mapboxgl-map');
       setStyleEpoch((prev) => prev + 1);
     });
 
     map.on('style.load', () => {
       map.resize();
+      map.getCanvas().classList.add('mapboxgl-canvas');
+      map.getContainer().classList.add('mapboxgl-map');
       setStyleEpoch((prev) => prev + 1);
     });
 
@@ -311,6 +493,14 @@ export default function DisasterMap({
     return () => {
       clearTimeout(resizeTimer);
       resizeObserver.disconnect();
+      if (drawRef.current && mapInstanceRef.current) {
+        try {
+          if (mapInstanceRef.current.hasControl(drawRef.current as unknown as maplibregl.IControl)) {
+            mapInstanceRef.current.removeControl(drawRef.current as unknown as maplibregl.IControl);
+          }
+        } catch {}
+        drawRef.current = null;
+      }
       markersRef.current.forEach((m) => m.remove());
       markersRef.current = [];
       if (hoverPopupRef.current) {
@@ -377,18 +567,30 @@ export default function DisasterMap({
         source: 'bbox-source',
         paint: {
           'fill-color': '#06B6D4',
-          'fill-opacity': 0.04,
+          'fill-opacity': 0.08,
         },
       });
 
+      // Outer glow line for high visibility
+      safeAddLayer(map, {
+        id: 'bbox-glow-layer',
+        type: 'line',
+        source: 'bbox-source',
+        paint: {
+          'line-color': '#0891B2',
+          'line-width': 6,
+          'line-opacity': 0.35,
+        },
+      });
+
+      // Sharp inner tactical border
       safeAddLayer(map, {
         id: 'bbox-line-layer',
         type: 'line',
         source: 'bbox-source',
         paint: {
-          'line-color': '#06B6D4',
-          'line-width': 1.5,
-          'line-dasharray': [3, 3],
+          'line-color': '#22D3EE',
+          'line-width': 2.5,
         },
       });
     };
@@ -863,112 +1065,248 @@ export default function DisasterMap({
     };
   }, [styleEpoch, isSubPixelsVisible, isNoiseVisible]);
 
-  // 8. Interactive Area of Interest (AOI) Bounding Box Drawing Mode
-  const startDrawingMode = useCallback(() => {
+  // 8. Interactive Area of Interest (AOI) Dual-Mode Drawing:
+  // Mode A: Drag-and-release OR 2-click Box drawing (custom WebGL preview layers + window pointerup)
+  // Mode B: MapboxDraw Polygon drawing (freehand multi-vertex polygon with automatic bounding box)
+  const boxStartRef = useRef<{ lng: number; lat: number; screenX: number; screenY: number } | null>(null);
+  const isMouseDownRef = useRef(false);
+
+  // Handle Box Drawing Mode events
+  useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
 
-    setIsDrawing(true);
+    if (drawingMode !== 'box') {
+      safeRemoveLayer(map, 'draw-aoi-line');
+      safeRemoveLayer(map, 'draw-aoi-fill');
+      safeRemoveSource(map, 'draw-aoi-source');
+      boxStartRef.current = null;
+      isMouseDownRef.current = false;
+      setBoxDrawCorner(null);
+      setScreenBox(null);
+      return;
+    }
+
     map.dragPan.disable();
     map.getCanvas().style.cursor = 'crosshair';
 
-    let startCoord: { lng: number; lat: number } | null = null;
+    const canvas = map.getCanvas();
 
-    const onMouseDown = (e: maplibregl.MapMouseEvent) => {
-      startCoord = { lng: e.lngLat.lng, lat: e.lngLat.lat };
+    const updatePreviewBox = (start: { lng: number; lat: number }, cur: { lng: number; lat: number }) => {
+      const minX = Math.min(start.lng, cur.lng);
+      const maxX = Math.max(start.lng, cur.lng);
+      const minY = Math.min(start.lat, cur.lat);
+      const maxY = Math.max(start.lat, cur.lat);
 
-      const onMouseMove = (moveEvent: maplibregl.MapMouseEvent) => {
-        if (!startCoord) return;
-        const cur = moveEvent.lngLat;
-        const minX = Math.min(startCoord.lng, cur.lng);
-        const maxX = Math.max(startCoord.lng, cur.lng);
-        const minY = Math.min(startCoord.lat, cur.lat);
-        const maxY = Math.max(startCoord.lat, cur.lat);
+      // 1. Update Real-Time Screen-Space Overlay Box (0ms lag, luminous glowing border)
+      try {
+        const p1 = map.project([minX, maxY]);
+        const p2 = map.project([maxX, minY]);
+        setScreenBox({
+          left: Math.min(p1.x, p2.x),
+          top: Math.min(p1.y, p2.y),
+          width: Math.max(2, Math.abs(p2.x - p1.x)),
+          height: Math.max(2, Math.abs(p2.y - p1.y)),
+          minLat: minY,
+          maxLat: maxY,
+          minLon: minX,
+          maxLon: maxX,
+        });
+      } catch {}
 
-        const rectGeoJson: GeoJSON.FeatureCollection = {
-          type: 'FeatureCollection',
-          features: [
-            {
-              type: 'Feature',
-              geometry: {
-                type: 'Polygon',
-                coordinates: [
-                  [
-                    [minX, minY],
-                    [maxX, minY],
-                    [maxX, maxY],
-                    [minX, maxY],
-                    [minX, minY],
-                  ],
+      // 2. Also update MapLibre GeoJSON preview layer
+      const rectGeoJson: GeoJSON.FeatureCollection = {
+        type: 'FeatureCollection',
+        features: [
+          {
+            type: 'Feature',
+            geometry: {
+              type: 'Polygon',
+              coordinates: [
+                [
+                  [minX, minY],
+                  [maxX, minY],
+                  [maxX, maxY],
+                  [minX, maxY],
+                  [minX, minY],
                 ],
-              },
-              properties: {},
+              ],
             },
-          ],
-        };
-
-        safeUpdateGeoJsonSource(map, 'draw-aoi-source', rectGeoJson);
-
-        safeAddLayer(map, {
-          id: 'draw-aoi-fill',
-          type: 'fill',
-          source: 'draw-aoi-source',
-          paint: {
-            'fill-color': '#22D3EE',
-            'fill-opacity': 0.15,
+            properties: {},
           },
-        });
-
-        safeAddLayer(map, {
-          id: 'draw-aoi-line',
-          type: 'line',
-          source: 'draw-aoi-source',
-          paint: {
-            'line-color': '#22D3EE',
-            'line-width': 2,
-            'line-dasharray': [2, 2],
-          },
-        });
+        ],
       };
 
-      const onMouseUp = (upEvent: maplibregl.MapMouseEvent) => {
-        map.off('mousemove', onMouseMove);
-        map.off('mouseup', onMouseUp);
+      safeUpdateGeoJsonSource(map, 'draw-aoi-source', rectGeoJson);
 
-        if (startCoord) {
-          const cur = upEvent.lngLat;
-          const south = Math.min(startCoord.lat, cur.lat);
-          const north = Math.max(startCoord.lat, cur.lat);
-          const west = Math.min(startCoord.lng, cur.lng);
-          const east = Math.max(startCoord.lng, cur.lng);
+      safeAddLayer(map, {
+        id: 'draw-aoi-fill',
+        type: 'fill',
+        source: 'draw-aoi-source',
+        paint: {
+          'fill-color': '#06B6D4',
+          'fill-opacity': 0.22,
+        },
+      });
 
-          // Ensure sensible dimensions (minimum ~500m)
-          if (Math.abs(north - south) > 0.005 && Math.abs(east - west) > 0.005) {
-            const rawBox: BoundingBox = {
-              min_lat: south,
-              max_lat: north,
-              min_lon: west,
-              max_lon: east,
-            };
-            onBoundsChange(normalizeBoundingBox(rawBox));
-          }
-        }
+      safeAddLayer(map, {
+        id: 'draw-aoi-line',
+        type: 'line',
+        source: 'draw-aoi-source',
+        paint: {
+          'line-color': '#22D3EE',
+          'line-width': 3,
+        },
+      });
+    };
 
+    const finishBox = (start: { lng: number; lat: number }, end: { lng: number; lat: number }) => {
+      const south = Math.min(start.lat, end.lat);
+      const north = Math.max(start.lat, end.lat);
+      const west = Math.min(start.lng, end.lng);
+      const east = Math.max(start.lng, end.lng);
+
+      if (Math.abs(north - south) > 0.005 && Math.abs(east - west) > 0.005) {
+        const rawBox: BoundingBox = {
+          min_lat: south,
+          max_lat: north,
+          min_lon: west,
+          max_lon: east,
+        };
+        onBoundsChange(normalizeBoundingBox(rawBox));
+      }
+
+      safeRemoveLayer(map, 'draw-aoi-line');
+      safeRemoveLayer(map, 'draw-aoi-fill');
+      safeRemoveSource(map, 'draw-aoi-source');
+      boxStartRef.current = null;
+      isMouseDownRef.current = false;
+      setBoxDrawCorner(null);
+      setScreenBox(null);
+      setDrawingMode('none');
+      map.dragPan.enable();
+      map.getCanvas().style.cursor = '';
+    };
+
+    const onMapMouseDown = (e: maplibregl.MapMouseEvent) => {
+      e.originalEvent?.preventDefault?.();
+      if (!boxStartRef.current) {
+        boxStartRef.current = {
+          lng: e.lngLat.lng,
+          lat: e.lngLat.lat,
+          screenX: e.point.x,
+          screenY: e.point.y,
+        };
+        isMouseDownRef.current = true;
+        setBoxDrawCorner({ lng: e.lngLat.lng, lat: e.lngLat.lat });
+      } else {
+        // Second click in 2-click mode finishes the box!
+        finishBox(boxStartRef.current, { lng: e.lngLat.lng, lat: e.lngLat.lat });
+      }
+    };
+
+    const onWindowMouseMove = (e: MouseEvent) => {
+      if (!boxStartRef.current) return;
+      const rect = canvas.getBoundingClientRect();
+      const currentX = e.clientX - rect.left;
+      const currentY = e.clientY - rect.top;
+      try {
+        const curLngLat = map.unproject([currentX, currentY]);
+        updatePreviewBox(boxStartRef.current, { lng: curLngLat.lng, lat: curLngLat.lat });
+      } catch {}
+    };
+
+    const onWindowMouseUp = (e: MouseEvent) => {
+      if (!isMouseDownRef.current || !boxStartRef.current) return;
+      isMouseDownRef.current = false;
+
+      const rect = canvas.getBoundingClientRect();
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+      const dist = Math.hypot(
+        screenX - boxStartRef.current.screenX,
+        screenY - boxStartRef.current.screenY
+      );
+
+      // If user dragged more than 8 pixels, complete the drag-to-box!
+      if (dist >= 8) {
+        try {
+          const endLngLat = map.unproject([screenX, screenY]);
+          finishBox(boxStartRef.current, { lng: endLngLat.lng, lat: endLngLat.lat });
+        } catch {}
+      } else {
+        // Keep first corner pinned for 2-click box
+        setBoxDrawCorner({ lng: boxStartRef.current.lng, lat: boxStartRef.current.lat });
+      }
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
         safeRemoveLayer(map, 'draw-aoi-line');
         safeRemoveLayer(map, 'draw-aoi-fill');
         safeRemoveSource(map, 'draw-aoi-source');
-
-        setIsDrawing(false);
+        boxStartRef.current = null;
+        isMouseDownRef.current = false;
+        setBoxDrawCorner(null);
+        setScreenBox(null);
+        setDrawingMode('none');
         map.dragPan.enable();
         map.getCanvas().style.cursor = '';
-      };
-
-      map.on('mousemove', onMouseMove);
-      map.once('mouseup', onMouseUp);
+      }
     };
 
-    map.once('mousedown', onMouseDown);
-  }, [onBoundsChange]);
+    map.on('mousedown', onMapMouseDown);
+    window.addEventListener('mousemove', onWindowMouseMove);
+    window.addEventListener('mouseup', onWindowMouseUp);
+    window.addEventListener('keydown', onKeyDown);
+
+    return () => {
+      map.off('mousedown', onMapMouseDown);
+      window.removeEventListener('mousemove', onWindowMouseMove);
+      window.removeEventListener('mouseup', onWindowMouseUp);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [drawingMode, onBoundsChange]);
+
+  // Toggle Box Draw Mode
+  const toggleBoxDrawMode = useCallback(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    if (drawingMode === 'box') {
+      setDrawingMode('none');
+    } else {
+      if (drawRef.current) {
+        try {
+          drawRef.current.changeMode('simple_select');
+          drawRef.current.deleteAll();
+        } catch {}
+      }
+      setDrawingMode('box');
+    }
+  }, [drawingMode]);
+
+  // Toggle MapboxDraw Polygon Draw Mode
+  const togglePolygonDrawMode = useCallback(() => {
+    const map = mapInstanceRef.current;
+    const draw = drawRef.current;
+    if (!map || !draw) return;
+
+    if (drawingMode === 'polygon') {
+      try {
+        draw.changeMode('simple_select');
+      } catch {}
+      setDrawingMode('none');
+    } else {
+      try {
+        draw.deleteAll();
+        draw.changeMode('draw_polygon');
+      } catch (err) {
+        console.warn('MapboxDraw changeMode error:', err);
+      }
+      setDrawingMode('polygon');
+    }
+  }, [drawingMode]);
 
   // Fit view to current bounding box
   const fitToQueryBounds = useCallback(() => {
@@ -984,26 +1322,65 @@ export default function DisasterMap({
   }, [bbox]);
 
   return (
-    <div className="relative w-full h-full overflow-hidden bg-slate-950">
+    <div className={`relative w-full h-full overflow-hidden bg-slate-950 ${isDrawing ? 'drawing-active' : ''}`}>
       {/* Map Container */}
       <div ref={mapContainerRef} className="absolute inset-0 w-full h-full z-0" />
+
+      {/* Screen-Space Live Drawing Preview Box (0ms hardware-accelerated, glowing neon cyan lines) */}
+      {screenBox && (
+        <div
+          className="absolute pointer-events-none z-[800] border-2 border-dashed border-cyan-400 bg-cyan-500/20 backdrop-blur-[1px] shadow-[0_0_15px_rgba(6,182,212,0.6)]"
+          style={{
+            left: `${screenBox.left}px`,
+            top: `${screenBox.top}px`,
+            width: `${screenBox.width}px`,
+            height: `${screenBox.height}px`,
+          }}
+        >
+          {/* Coordinates chip badge */}
+          <div className="absolute -top-7 left-0 px-2 py-0.5 bg-slate-900/95 border border-cyan-400/80 rounded text-[10px] font-mono text-cyan-300 whitespace-nowrap shadow-md">
+            AOI: {screenBox.minLat.toFixed(2)}°, {screenBox.minLon.toFixed(2)}° → {screenBox.maxLat.toFixed(2)}°, {screenBox.maxLon.toFixed(2)}°
+          </div>
+        </div>
+      )}
 
       {/* Floating Tactical Overlay Controls (Unified Responsive Top Bar) */}
       <div className="absolute top-4 left-4 right-16 z-[1000] flex flex-wrap items-center justify-between gap-4 pointer-events-none">
         {/* Left Side: Drawing Tools & Basemap Switcher */}
         <div className="flex flex-wrap items-center gap-2 pointer-events-auto">
           <div className="flex items-center gap-1.5 p-1.5 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg shadow-2xl">
+            {/* Box Draw Mode: Drag or 2-Click */}
             <button
-              onClick={startDrawingMode}
+              onClick={toggleBoxDrawMode}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-all ${
-                isDrawing
+                drawingMode === 'box'
                   ? 'bg-cyan-500 text-slate-950 shadow-glow-cyan font-semibold animate-pulse'
                   : 'bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700'
               }`}
-              title="Click and drag on map to define Area of Interest"
+              title="Click & drag or click 2 opposite corners to define Area of Interest box"
             >
               <Crosshair className="w-3.5 h-3.5" />
-              <span>{isDrawing ? 'Drawing AOI (Drag on Map)...' : 'Draw AOI Box'}</span>
+              <span>
+                {drawingMode === 'box'
+                  ? boxDrawCorner
+                    ? 'Click 2nd Corner'
+                    : 'Drawing Box...'
+                  : 'Draw AOI Box'}
+              </span>
+            </button>
+
+            {/* Polygon Draw Mode: MapboxDraw multi-vertex */}
+            <button
+              onClick={togglePolygonDrawMode}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-all ${
+                drawingMode === 'polygon'
+                  ? 'bg-cyan-500 text-slate-950 shadow-glow-cyan font-semibold animate-pulse'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white border border-slate-700'
+              }`}
+              title="Draw multi-point polygon Area of Interest (click points, double-click to complete)"
+            >
+              <Pentagon className="w-3.5 h-3.5" />
+              <span>{drawingMode === 'polygon' ? 'Drawing Polygon...' : 'Draw Polygon'}</span>
             </button>
 
             <button
@@ -1055,10 +1432,21 @@ export default function DisasterMap({
             </div>
           </div>
 
-          {isDrawing && (
+          {drawingMode === 'box' && (
             <div className="px-3 py-1.5 bg-cyan-950/90 border border-cyan-500/50 rounded-lg text-xs text-cyan-200 backdrop-blur-md shadow-lg flex items-center gap-2">
               <Radio className="w-3.5 h-3.5 animate-pulse text-cyan-400" />
-              <span>Drag to define AOI bounding box</span>
+              <span>
+                {boxDrawCorner
+                  ? 'Corner 1 set. Click opposite corner on map to finish (or Esc to cancel)'
+                  : 'Drag across map OR click 2 opposite corners to define AOI (Esc to cancel)'}
+              </span>
+            </div>
+          )}
+
+          {drawingMode === 'polygon' && (
+            <div className="px-3 py-1.5 bg-cyan-950/90 border border-cyan-500/50 rounded-lg text-xs text-cyan-200 backdrop-blur-md shadow-lg flex items-center gap-2">
+              <Radio className="w-3.5 h-3.5 animate-pulse text-cyan-400" />
+              <span>Click points on map to draw polygon. Double-click or click start point to complete (Esc to cancel)</span>
             </div>
           )}
         </div>

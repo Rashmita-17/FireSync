@@ -9,6 +9,8 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@mapbox/mapbox-gl-draw": "^1.5.2",
+    "@types/mapbox__mapbox-gl-draw": "^1.4.9",
     "clsx": "^2.1.1",
     "lucide-react": "^0.475.0",
     "maplibre-gl": "^6.18.0",

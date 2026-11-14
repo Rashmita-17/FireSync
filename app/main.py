@@ -24,9 +24,30 @@ logger = logging.getLogger("nasa_firms")
 # Project data directory & target NASA FIRMS Global 7-day CSV datasets
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 TARGET_DATASET_FILENAMES = [
+    "fire_archive_M-C61_842425.csv",
+    "fire_archive_SV-C2_842427.csv",
+    "fire_archive_J1V-C2_842426.csv",
+    "fire_nrt_M-C61_842425.csv",
+    "fire_nrt_SV-C2_842427.csv",
+    "fire_nrt_J1V-C2_842426.csv",
     "MODIS_C6_1_Global_7d.csv",
     "J1_VIIRS_C2_Global_7d.csv",
+    "sample_modis_viirs_data.csv",
 ]
+
+
+def get_available_datasets(target_dir: Path) -> List[str]:
+    """Finds all NASA FIRMS CSV dataset files in data/ directory."""
+    if not target_dir.exists():
+        return []
+    candidates = []
+    for p in TARGET_DATASET_FILENAMES:
+        if (target_dir / p).exists() and p not in candidates:
+            candidates.append(p)
+    for f in target_dir.glob("*.csv"):
+        if f.name not in candidates and not f.name.startswith("harmonized_"):
+            candidates.append(f.name)
+    return candidates
 
 
 def ingest_global_fire_datasets(
@@ -35,12 +56,11 @@ def ingest_global_fire_datasets(
     force: bool = False,
 ) -> List[IngestionReport]:
     """
-    Loops through and ingests the specific NASA FIRMS global fire datasets
-    (MODIS_C6_1_Global_7d.csv and J1_VIIRS_C2_Global_7d.csv) into the database.
-    Replaces old sample data and ensures robust parsing of the new FIRMS schemas.
+    Loops through and ingests all NASA FIRMS fire datasets
+    present in the data/ directory into the database.
     """
     target_dir = Path(data_dir) if data_dir else DATA_DIR
-    files_to_process = target_files or TARGET_DATASET_FILENAMES
+    files_to_process = target_files or get_available_datasets(target_dir)
 
     reports: List[IngestionReport] = []
     db = SessionLocal()
@@ -155,6 +175,8 @@ app.add_middleware(
 
 # Register API router
 app.include_router(api_router, prefix=settings.API_V1_STR, tags=["Harmonization & Data Services"])
+# Also mount router without prefix so /health, /db-status, etc. work directly
+app.include_router(api_router, prefix="", include_in_schema=False)
 
 
 @app.get("/", include_in_schema=False)
