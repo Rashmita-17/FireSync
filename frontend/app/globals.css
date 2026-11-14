@@ -32,7 +32,8 @@ body {
   background: #334155;
 }
 
-/* Leaflet Dark Popup Customization */
+/* MapLibre Dark Popup Customization */
+.tactical-maplibre-popup .maplibregl-popup-content,
 .tactical-leaflet-popup .leaflet-popup-content-wrapper {
   background: rgba(15, 23, 42, 0.95) !important;
   border: 1px solid rgba(51, 65, 85, 0.9) !important;
@@ -43,16 +44,24 @@ body {
   padding: 0 !important;
 }
 
+.tactical-maplibre-popup .maplibregl-popup-tip {
+  border-top-color: rgba(15, 23, 42, 0.95) !important;
+  border-bottom-color: rgba(15, 23, 42, 0.95) !important;
+}
+
 .tactical-leaflet-popup .leaflet-popup-tip {
   background: rgba(15, 23, 42, 0.95) !important;
   border: 1px solid rgba(51, 65, 85, 0.9) !important;
 }
 
+.tactical-maplibre-popup .maplibregl-popup-close-button,
 .tactical-leaflet-popup .leaflet-popup-close-button {
   color: #94A3B8 !important;
   padding: 6px 10px 0 0 !important;
+  font-size: 16px !important;
 }
 
+.tactical-maplibre-popup .maplibregl-popup-close-button:hover,
 .tactical-leaflet-popup .leaflet-popup-close-button:hover {
   color: #FFFFFF !important;
 }
@@ -64,9 +73,13 @@ body {
   border: none !important;
 }
 
-/* Leaflet container dark background */
+/* Map container dark background */
+.maplibregl-map,
 .leaflet-container {
   background: #090D16 !important;
   font-family: inherit !important;
 }
 
+.maplibregl-canvas-container {
+  outline: none;
+}
