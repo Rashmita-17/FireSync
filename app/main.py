@@ -119,14 +119,36 @@ def ingest_global_fire_datasets(
 
 import threading
 
+def validate_startup_config():
+    """Validates required configurations before server starts serving traffic."""
+    map_key = settings.get_map_key()
+    if not map_key:
+        error_msg = (
+            "FATAL STARTUP ERROR: NASA FIRMS MAP_KEY is not configured! "
+            "Please configure MAP_KEY or FIRMS_MAP_KEY environment variable (or add it to your .env file). "
+            "Get a free instant API key at: https://firms.modaps.eosdis.nasa.gov/api/map_key/"
+        )
+        logger.critical(error_msg)
+        raise RuntimeError(error_msg)
+    logger.info("[Startup] NASA FIRMS MAP_KEY validated successfully.")
+    return True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Application lifespan context manager:
-    Initializes database schema and automatically checks/ingests target global fire datasets
-    in a background thread so the server starts serving requests immediately.
+    1. Validates presence of NASA FIRMS MAP_KEY, failing loudly at startup if missing.
+    2. Initializes database schema.
+    3. Checks/ingests target global fire datasets in a background thread.
     """
+    # 1. Enforce MAP_KEY presence
+    validate_startup_config()
+
+    # 2. Database schema initialization
     init_db()
+
+    # 3. Background dataset verification
     def _background_ingest():
         try:
             ingest_global_fire_datasets()
@@ -157,17 +179,14 @@ A high-performance spatio-temporal data engineering engine that resolves sensor 
 )
 
 # Enable CORS for frontend applications (Leaflet, Next.js, Cesium, Mapbox, Deck.gl)
+cors_origins = settings.get_cors_origins()
+is_wildcard = "*" in cors_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-        "*",
-    ],
-    allow_origin_regex=r"https?://.*",
-    allow_credentials=True,
+    allow_origins=["*"] if is_wildcard else cors_origins,
+    allow_origin_regex=None if is_wildcard else r"https?://.*",
+    allow_credentials=not is_wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],

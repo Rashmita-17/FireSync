@@ -91,6 +91,16 @@ class HarmonizationRequest(BaseModel):
     )
 
     # Optional Filters
+    day_range: int = Field(
+        3,
+        ge=1,
+        le=10,
+        description="Lookback window in days (1-10) for NASA FIRMS queries"
+    )
+    use_live: Optional[bool] = Field(
+        None,
+        description="Whether to query live NASA FIRMS API directly"
+    )
     instruments: Optional[List[str]] = Field(
         None,
         description="Filter by instruments (e.g. ['MODIS', 'VIIRS'])"

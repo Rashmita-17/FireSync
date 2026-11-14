@@ -13,12 +13,15 @@ import {
   Sparkles,
   ChevronDown,
   ChevronUp,
+  Calendar,
 } from 'lucide-react';
 
 interface ControlPanelProps {
   bbox: BoundingBox;
   onBboxChange: (bbox: BoundingBox) => void;
   onHarmonize: (params?: Partial<HarmonizeParams>) => void;
+  dayRange: number;
+  onDayRangeChange: (days: number) => void;
   onExportCsv: () => void;
   loading: boolean;
   exporting: boolean;
@@ -34,6 +37,8 @@ export default function ControlPanel({
   bbox,
   onBboxChange,
   onHarmonize,
+  dayRange,
+  onDayRangeChange,
   onExportCsv,
   loading,
   exporting,
@@ -72,6 +77,7 @@ export default function ControlPanel({
   const handleApplyHarmonize = () => {
     onHarmonize({
       bbox: normalizeBoundingBox(bbox),
+      day_range: dayRange,
       spatial_bandwidth_km: spatialBandwidth,
       temporal_bandwidth_hours: temporalBandwidth,
       min_cluster_size: minClusterSize,
@@ -163,6 +169,51 @@ export default function ControlPanel({
                 className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700/80 rounded-md font-mono text-slate-100 focus:outline-none focus:border-cyan-500 transition"
               />
             </div>
+          </div>
+        </div>
+
+        {/* Section 2b: NASA FIRMS Lookback Window (1-10 days) */}
+        <div className="space-y-2 p-3 bg-slate-900/60 rounded-xl border border-slate-800/80">
+          <div className="flex items-center justify-between text-xs font-semibold text-slate-300">
+            <div className="flex items-center gap-1.5">
+              <Calendar className="w-3.5 h-3.5 text-amber-400" />
+              <span>FIRMS Lookback Window</span>
+            </div>
+            <span className="font-mono text-amber-400 font-bold">{dayRange} {dayRange === 1 ? 'day' : 'days'}</span>
+          </div>
+
+          <input
+            type="range"
+            min="1"
+            max="10"
+            step="1"
+            value={dayRange}
+            onChange={(e) => onDayRangeChange(parseInt(e.target.value, 10))}
+            className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+          />
+
+          <div className="flex justify-between text-[10px] text-slate-500">
+            <span>1 day (NRT)</span>
+            <span>3 days (Default)</span>
+            <span>7 days</span>
+            <span>10 days (Max)</span>
+          </div>
+
+          <div className="grid grid-cols-4 gap-1 pt-1">
+            {[1, 3, 7, 10].map((d) => (
+              <button
+                key={d}
+                type="button"
+                onClick={() => onDayRangeChange(d)}
+                className={`py-1 rounded text-[10px] font-semibold border transition ${
+                  dayRange === d
+                    ? 'bg-amber-500/20 border-amber-500/60 text-amber-300 shadow-glow-amber/20'
+                    : 'bg-slate-950/60 hover:bg-slate-800 border-slate-800 text-slate-400'
+                }`}
+              >
+                {d}d
+              </button>
+            ))}
           </div>
         </div>
 

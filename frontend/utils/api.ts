@@ -21,6 +21,13 @@ export function resolveApiBaseUrl(): string {
     }
     return cleanUrl;
   }
+  // If running in browser on deployed domain (not localhost), use same-origin fallback
+  if (typeof window !== 'undefined') {
+    const hostname = window.location.hostname;
+    if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
+      return '';
+    }
+  }
   // Default to 127.0.0.1 on local environments to bypass Windows IPv6 resolution latency
   return 'http://127.0.0.1:8000';
 }
@@ -79,6 +86,8 @@ export const PRESET_REGIONS: PresetRegion[] = [
 
 export interface HarmonizeParams {
   bbox: BoundingBox;
+  day_range?: number;
+  use_live?: boolean;
   spatial_bandwidth_km?: number;
   temporal_bandwidth_hours?: number;
   min_cluster_size?: number;
@@ -175,6 +184,8 @@ export async function fetchHarmonizedData(params: HarmonizeParams): Promise<Harm
   const normalizedBbox = normalizeBoundingBox(params.bbox);
   const payload = {
     bbox: normalizedBbox,
+    day_range: params.day_range ?? 3,
+    use_live: params.use_live ?? false,
     spatial_bandwidth_km: params.spatial_bandwidth_km ?? 2.5,
     temporal_bandwidth_hours: params.temporal_bandwidth_hours ?? 6.0,
     min_cluster_size: params.min_cluster_size ?? 2,
@@ -248,7 +259,14 @@ export async function fetchHarmonizedData(params: HarmonizeParams): Promise<Harm
         `FastAPI backend returned HTML error at ${activeUrl} (Status ${response.status}). Check backend logs.`
       );
     }
-    throw new Error(`Harmonization failed (${response.status}): ${errorText || response.statusText}`);
+    let detailMsg = errorText;
+    try {
+      const parsed = JSON.parse(errorText);
+      if (parsed?.detail) {
+        detailMsg = typeof parsed.detail === 'string' ? parsed.detail : JSON.stringify(parsed.detail);
+      }
+    } catch {}
+    throw new Error(`Harmonization failed (HTTP ${response.status}): ${detailMsg || response.statusText}`);
   }
 
   // Safe Harmonize Parsing: gracefully handle [], null, {}, or missing clusters

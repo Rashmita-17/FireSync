@@ -24,6 +24,8 @@ export default function DisasterResponseDashboard() {
 
   // Primary Bounding Box state (Default: Sierra Nevada / Central California)
   const [bbox, setBbox] = useState<BoundingBox>(PRESET_REGIONS[0].bbox);
+  // FIRMS Query Lookback Window (1-10 days, default 3)
+  const [dayRange, setDayRange] = useState<number>(3);
 
   // Harmonization data states
   const [clusters, setClusters] = useState<HarmonizedCluster[]>([]);
@@ -66,6 +68,7 @@ export default function DisasterResponseDashboard() {
       try {
         const queryParams: HarmonizeParams = {
           bbox: targetBbox,
+          day_range: overrideParams?.day_range ?? dayRange,
           spatial_bandwidth_km: overrideParams?.spatial_bandwidth_km ?? 2.5,
           temporal_bandwidth_hours: overrideParams?.temporal_bandwidth_hours ?? 6.0,
           min_cluster_size: overrideParams?.min_cluster_size ?? 2,
@@ -154,10 +157,10 @@ export default function DisasterResponseDashboard() {
     setBbox(normalizeBoundingBox(newBbox));
   };
 
-  // Re-run harmonization whenever bbox changes
+  // Re-run harmonization whenever bbox or dayRange changes
   useEffect(() => {
     executeHarmonization();
-  }, [bbox]);
+  }, [bbox, dayRange]);
 
   // Check backend health on mount and every 30 seconds
   useEffect(() => {
@@ -198,6 +201,8 @@ export default function DisasterResponseDashboard() {
             bbox={bbox}
             onBboxChange={handleBoundsChange}
             onHarmonize={executeHarmonization}
+            dayRange={dayRange}
+            onDayRangeChange={setDayRange}
             onExportCsv={handleExportCsv}
             loading={loading}
             exporting={exporting}
@@ -212,11 +217,12 @@ export default function DisasterResponseDashboard() {
           {/* Center: Dynamic Geospatial Map */}
           <div className="flex-1 relative h-full">
             {errorNotice && (
-              <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[1500] px-4 py-2 bg-rose-950/90 border border-rose-500 text-rose-200 text-xs rounded-lg backdrop-blur-md shadow-2xl flex items-center gap-3">
-                <span>⚠️ {errorNotice}</span>
+              <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[1500] max-w-xl px-4 py-2.5 bg-rose-950/95 border border-rose-500/80 text-rose-200 text-xs rounded-xl backdrop-blur-md shadow-2xl flex items-center gap-3 animate-fade-in">
+                <span className="font-semibold text-rose-300">⚠️ Backend Error:</span>
+                <span className="flex-1 font-mono text-[11px] break-words">{errorNotice}</span>
                 <button
                   onClick={() => setErrorNotice(null)}
-                  className="text-xs text-rose-400 hover:text-white underline font-semibold"
+                  className="px-2 py-0.5 rounded bg-rose-900/60 hover:bg-rose-800 text-xs text-rose-200 font-semibold border border-rose-700/60"
                 >
                   Dismiss
                 </button>
@@ -245,6 +251,8 @@ export default function DisasterResponseDashboard() {
             selectedClusterId={selectedCluster?.cluster_id ?? null}
             onSelectCluster={(cluster) => setSelectedCluster(cluster)}
             loading={loading}
+            errorNotice={errorNotice}
+            onRetry={() => executeHarmonization()}
           />
         </main>
       ) : (
