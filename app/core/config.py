@@ -66,20 +66,6 @@ class Settings(BaseSettings):
     # Confidence calibration bonus for multi-sensor cross-validated detections
     CROSS_SENSOR_CONFIDENCE_BONUS: float = 15.0
 
-    # Large-Area Threshold & Cache Configuration
-    LARGE_AREA_DEGREE_THRESHOLD: float = Field(
-        default=40.0,
-        description="Threshold in degrees (dimension or sqrt of area in deg^2) above which an AOI is treated as large-area"
-    )
-    LARGE_AREA_ROW_THRESHOLD: int = Field(
-        default=40000,
-        description="Raw observation count threshold above which thinning is applied"
-    )
-    LARGE_AREA_CACHE_TTL_SECONDS: int = Field(
-        default=900,
-        description="In-memory TTL cache duration in seconds (default 15 minutes) for large-area queries"
-    )
-
     def get_map_key(self) -> str:
         """Returns the configured NASA FIRMS MAP_KEY from settings or OS environment."""
         key = self.MAP_KEY or self.FIRMS_MAP_KEY or os.environ.get("MAP_KEY") or os.environ.get("FIRMS_MAP_KEY") or ""

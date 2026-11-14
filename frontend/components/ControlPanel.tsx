@@ -52,9 +52,6 @@ export default function ControlPanel({
   // Advanced parameters accordion state
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  // Presets category filter
-  const [presetCategory, setPresetCategory] = useState<'all' | 'global' | 'americas' | 'eurasia' | 'asiapacific'>('all');
-
   // Hyperparameters
   const [spatialBandwidth, setSpatialBandwidth] = useState(2.5);
   const [temporalBandwidth, setTemporalBandwidth] = useState(6.0);
@@ -75,32 +72,7 @@ export default function ControlPanel({
   // Select preset region
   const handleSelectPreset = (preset: PresetRegion) => {
     onBboxChange(preset.bbox);
-    if (preset.id === 'world-overview') {
-      onDayRangeChange(2);
-    }
   };
-
-  const filteredPresets = PRESET_REGIONS.filter((region) => {
-    if (presetCategory === 'all') return true;
-    if (presetCategory === 'global') return region.id === 'world-overview';
-    if (presetCategory === 'americas') {
-      return (
-        region.id === 'amazon-arc' ||
-        region.id === 'canada-boreal' ||
-        region.id.includes('california') ||
-        region.id.includes('sierra') ||
-        region.id.includes('cascade') ||
-        region.id.includes('shasta')
-      );
-    }
-    if (presetCategory === 'eurasia') {
-      return region.id === 'central-africa' || region.id === 'mediterranean' || region.id === 'siberia-taiga';
-    }
-    if (presetCategory === 'asiapacific') {
-      return region.id === 'australia-east' || region.id === 'indonesia' || region.id === 'india-punjab';
-    }
-    return true;
-  });
 
   const handleApplyHarmonize = () => {
     onHarmonize({
@@ -123,37 +95,10 @@ export default function ControlPanel({
               <Compass className="w-3.5 h-3.5 text-cyan-400" />
               <span>Response Sectors (AOI)</span>
             </div>
-            <span className="text-[10px] text-cyan-400 font-mono font-normal">Global</span>
           </div>
 
-          {/* Category Tabs */}
-          <div className="flex items-center gap-1 overflow-x-auto pb-1 text-[10px] font-medium no-scrollbar">
-            {(
-              [
-                { id: 'all', label: 'All' },
-                { id: 'global', label: 'World' },
-                { id: 'americas', label: 'Americas' },
-                { id: 'eurasia', label: 'Eurasia' },
-                { id: 'asiapacific', label: 'Asia-Pac' },
-              ] as const
-            ).map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setPresetCategory(tab.id)}
-                className={`px-2 py-0.5 rounded transition whitespace-nowrap ${
-                  presetCategory === tab.id
-                    ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-semibold'
-                    : 'bg-slate-900/60 text-slate-400 hover:text-slate-200 border border-slate-800'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="grid grid-cols-2 gap-1.5 max-h-56 overflow-y-auto pr-0.5 custom-scrollbar">
-            {filteredPresets.map((region) => {
+          <div className="grid grid-cols-2 gap-1.5">
+            {PRESET_REGIONS.map((region) => {
               const isSelected =
                 Math.abs(bbox.min_lat - region.bbox.min_lat) < 0.1 &&
                 Math.abs(bbox.max_lat - region.bbox.max_lat) < 0.1;

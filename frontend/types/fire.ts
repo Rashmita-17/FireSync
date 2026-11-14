@@ -69,8 +69,6 @@ export interface HarmonizationResponse {
   summary: HarmonizationSummary;
   clusters: HarmonizedCluster[];
   noise_points?: RawObservation[];
-  warning?: string;
-  notice?: string;
 }
 
 export interface BackendStats {

@@ -50,83 +50,9 @@ const ALTERNATE_API_BASE_URL = isLocalhost
   : API_BASE_URL;
 
 export const PRESET_REGIONS: PresetRegion[] = [
-  // Global Major Fire Fronts
-  {
-    id: 'world-overview',
-    name: 'World Overview (Global)',
-    description: 'Planet-scale satellite active fire detection grid (1-2 day lookback)',
-    bbox: { min_lon: -180.0, min_lat: -60.0, max_lon: 180.0, max_lat: 75.0 },
-    center: [15.0, 0.0],
-    zoom: 2,
-  },
-  {
-    id: 'australia-east',
-    name: 'Australia East (NSW/QLD)',
-    description: 'Eastern Australia bushfire monitoring zone (New South Wales & Queensland)',
-    bbox: { min_lon: 140.0, min_lat: -38.0, max_lon: 154.0, max_lat: -25.0 },
-    center: [-31.5, 147.0],
-    zoom: 6,
-  },
-  {
-    id: 'amazon-arc',
-    name: 'Amazon Arc of Deforestation',
-    description: 'Southern Brazilian Amazon active fire belt (Mato Grosso / Para)',
-    bbox: { min_lon: -62.0, min_lat: -12.0, max_lon: -50.0, max_lat: -3.0 },
-    center: [-7.5, -56.0],
-    zoom: 6,
-  },
-  {
-    id: 'central-africa',
-    name: 'Central Africa / Sahel',
-    description: 'Sub-Saharan equatorial active burning and savanna fire belt',
-    bbox: { min_lon: 15.0, min_lat: -10.0, max_lon: 30.0, max_lat: 5.0 },
-    center: [-2.5, 22.5],
-    zoom: 5,
-  },
-  {
-    id: 'indonesia',
-    name: 'Indonesia (Sumatra/Kalimantan)',
-    description: 'Peatland and tropical forest fire management zone',
-    bbox: { min_lon: 100.0, min_lat: -6.0, max_lon: 112.0, max_lat: 3.0 },
-    center: [-1.5, 106.0],
-    zoom: 6,
-  },
-  {
-    id: 'india-punjab',
-    name: 'India (Punjab/Haryana)',
-    description: 'Indo-Gangetic agricultural residue burning and seasonal fire front',
-    bbox: { min_lon: 73.0, min_lat: 29.0, max_lon: 77.0, max_lat: 32.0 },
-    center: [30.5, 75.0],
-    zoom: 7,
-  },
-  {
-    id: 'mediterranean',
-    name: 'Mediterranean Europe',
-    description: 'Southern Europe wildland-urban interface (Spain, Italy, Greece)',
-    bbox: { min_lon: -10.0, min_lat: 35.0, max_lon: 30.0, max_lat: 45.0 },
-    center: [40.0, 10.0],
-    zoom: 5,
-  },
-  {
-    id: 'siberia-taiga',
-    name: 'Siberia / Russian Far East',
-    description: 'Boreal taiga wildfire complexes in Sakha and Eastern Siberia',
-    bbox: { min_lon: 115.0, min_lat: 50.0, max_lon: 140.0, max_lat: 65.0 },
-    center: [57.5, 127.5],
-    zoom: 5,
-  },
-  {
-    id: 'canada-boreal',
-    name: 'Canada Boreal Forest',
-    description: 'Western Canadian shield and subarctic wildfire belt',
-    bbox: { min_lon: -125.0, min_lat: 50.0, max_lon: -105.0, max_lat: 60.0 },
-    center: [55.0, -115.0],
-    zoom: 5,
-  },
-  // United States Monitoring Sectors
   {
     id: 'all-california-pnw',
-    name: 'Western Sector Overview (US)',
+    name: 'Western Sector Overview',
     description: 'Full active monitoring zone covering California and Pacific Northwest',
     bbox: { min_lon: -125.0, min_lat: 36.0, max_lon: -118.0, max_lat: 45.0 },
     center: [40.5, -121.5],
@@ -134,7 +60,7 @@ export const PRESET_REGIONS: PresetRegion[] = [
   },
   {
     id: 'sierra-complex',
-    name: 'Sierra Nevada Complex (US)',
+    name: 'Sierra Nevada Complex',
     description: 'High-threat active perimeter in central California forest zones',
     bbox: { min_lon: -120.8, min_lat: 37.2, max_lon: -119.0, max_lat: 38.6 },
     center: [37.85, -119.55],
@@ -142,7 +68,7 @@ export const PRESET_REGIONS: PresetRegion[] = [
   },
   {
     id: 'cascade-front',
-    name: 'Cascade Range Front (US)',
+    name: 'Cascade Range Front',
     description: 'Oregon Cascade crest timber and wildland-urban interface',
     bbox: { min_lon: -122.8, min_lat: 43.5, max_lon: -121.0, max_lat: 44.9 },
     center: [44.15, -121.75],
@@ -150,7 +76,7 @@ export const PRESET_REGIONS: PresetRegion[] = [
   },
   {
     id: 'shasta-klamath',
-    name: 'Shasta-Klamath Ridge (US)',
+    name: 'Shasta-Klamath Ridge',
     description: 'Northern California steep terrain fire management zone',
     bbox: { min_lon: -123.0, min_lat: 40.8, max_lon: -121.3, max_lat: 42.4 },
     center: [41.5, -122.1],
@@ -196,37 +122,16 @@ export function normalizeBoundingBox(bbox: BoundingBox): BoundingBox {
   const lon1 = wrapLongitude(Number(bbox.min_lon) || 0);
   const lon2 = wrapLongitude(Number(bbox.max_lon) || 0);
 
-  // If drawn right-to-left without crossing antimeridian (|lon1 - lon2| < 180), order min <= max.
-  // When lon1 > lon2 and difference >= 180, this represents an antimeridian crossing query.
-  let minLon = lon1;
-  let maxLon = lon2;
-  if (lon1 > lon2 && (lon1 - lon2) < 180) {
-    minLon = lon2;
-    maxLon = lon1;
-  }
-
   return {
     min_lat: Number(Math.min(lat1, lat2).toFixed(4)),
     max_lat: Number(Math.max(lat1, lat2).toFixed(4)),
-    min_lon: Number(minLon.toFixed(4)),
-    max_lon: Number(maxLon.toFixed(4)),
+    min_lon: Number(Math.min(lon1, lon2).toFixed(4)),
+    max_lon: Number(Math.max(lon1, lon2).toFixed(4)),
   };
 }
 
 export const DEFAULT_FETCH_TIMEOUT_MS = 8000;
-export const HARMONIZATION_TIMEOUT_MS = 45000;
-export const LARGE_AREA_TIMEOUT_MS = 120000;
-
-/**
- * Checks if a bounding box exceeds the large-area threshold (>= 40° span or 1600 sq deg).
- */
-export function isLargeAreaBbox(bbox: BoundingBox, thresholdDeg: number = 40.0): boolean {
-  const lonSpan = bbox.min_lon > bbox.max_lon
-    ? 360.0 - (bbox.min_lon - bbox.max_lon)
-    : Math.abs(bbox.max_lon - bbox.min_lon);
-  const latSpan = Math.abs(bbox.max_lat - bbox.min_lat);
-  return lonSpan > thresholdDeg || latSpan > thresholdDeg || (lonSpan * latSpan) > (thresholdDeg * thresholdDeg);
-}
+export const HARMONIZATION_TIMEOUT_MS = 20000;
 
 /**
  * Executes a browser fetch with an abort timeout and supports external cancellation signals.
@@ -310,12 +215,9 @@ export async function fetchHarmonizedData(params: HarmonizeParams): Promise<Harm
     noise_points: [],
   };
 
-  const isLarge = isLargeAreaBbox(normalizedBbox);
-  const timeoutMs = isLarge ? LARGE_AREA_TIMEOUT_MS : HARMONIZATION_TIMEOUT_MS;
-
   const executePost = async (baseUrl: string) => {
     const fullUrl = `${baseUrl}/api/harmonize`;
-    console.log(`[FireSync API Fetch] Calling: ${fullUrl} (timeout: ${timeoutMs / 1000}s, isLargeArea: ${isLarge})`);
+    console.log(`[FireSync API Fetch] Calling: ${fullUrl}`);
     return fetchWithTimeout(
       fullUrl,
       {
@@ -324,7 +226,7 @@ export async function fetchHarmonizedData(params: HarmonizeParams): Promise<Harm
         body: JSON.stringify(payload),
         signal: params.signal,
       },
-      timeoutMs
+      HARMONIZATION_TIMEOUT_MS
     );
   };
 

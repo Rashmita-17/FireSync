@@ -1,10 +1,8 @@
 import io
 import re
-import math
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, time as dtime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 import httpx
 import pandas as pd
 from fastapi import HTTPException
@@ -57,37 +55,6 @@ SATELLITE_NORMALIZATION = {
 def mask_map_key(url: str) -> str:
     """Masks NASA FIRMS map key in URLs for safe diagnostic logging."""
     return re.sub(r"/api/area/csv/[^/]+/", "/api/area/csv/***MASKED***/", url)
-
-
-REPRESENTATIVE_GLOBAL_BELTS = [
-    # Australia Bushfire Belt (NSW / Queensland)
-    BoundingBox(min_lon=135.0, min_lat=-38.0, max_lon=155.0, max_lat=-18.0),
-    # Amazon Arc of Deforestation (Brazil)
-    BoundingBox(min_lon=-62.0, min_lat=-15.0, max_lon=-42.0, max_lat=5.0),
-    # Central Africa / Sahel Savanna Belt
-    BoundingBox(min_lon=12.0, min_lat=-12.0, max_lon=32.0, max_lat=8.0),
-    # South Asia / Indo-Gangetic Fire Front
-    BoundingBox(min_lon=68.0, min_lat=18.0, max_lon=88.0, max_lat=38.0),
-    # Southeast Asia / Indonesia Tropical Peatland
-    BoundingBox(min_lon=98.0, min_lat=-8.0, max_lon=118.0, max_lat=12.0),
-    # Mediterranean Europe Wildland-Urban Interface
-    BoundingBox(min_lon=-5.0, min_lat=35.0, max_lon=15.0, max_lat=48.0),
-    # North America West Wildfire Belt
-    BoundingBox(min_lon=-125.0, min_lat=32.0, max_lon=-105.0, max_lat=52.0),
-    # Siberia / Russian Far East Boreal Taiga
-    BoundingBox(min_lon=115.0, min_lat=50.0, max_lon=135.0, max_lat=65.0),
-]
-
-
-def bbox_intersects(b1: BoundingBox, b2: BoundingBox) -> bool:
-    """Checks if two bounding boxes in EPSG:4326 intersect."""
-    if b1.min_lon <= b1.max_lon and b2.min_lon <= b2.max_lon:
-        lon_overlap = max(b1.min_lon, b2.min_lon) <= min(b1.max_lon, b2.max_lon)
-    else:
-        # Crosses antimeridian
-        lon_overlap = True
-    lat_overlap = max(b1.min_lat, b2.min_lat) <= min(b1.max_lat, b2.max_lat)
-    return lon_overlap and lat_overlap
 
 
 class FirmsClient:
@@ -308,197 +275,33 @@ class FirmsClient:
 
         return observations
 
-    @classmethod
-    def decompose_bbox(
-        cls,
-        bbox: BoundingBox,
-        max_tile_deg: float = 20.0,
-        max_tiles: int = 16,
-    ) -> Tuple[List[BoundingBox], Optional[str]]:
-        """
-        Decomposes a bounding box into valid NASA FIRMS Area API sub-queries:
-        1. Identifies planetary-scale queries (lon_span >= 120° or lat_span >= 70°) and samples
-           representative wildfire and biomass burning monitoring belts (<= 20° x 20° each).
-        2. Handles Antimeridian crossings (min_lon > max_lon) by splitting across +/-180°.
-        3. Enforces the NASA FIRMS invariant that sub-tile dimensions NEVER exceed 20° x 20°.
-        Returns (tiles, warning_message).
-        """
-        # Determine total longitudinal and latitudinal footprint
-        if bbox.min_lon > bbox.max_lon:
-            total_lon_span = 360.0 - (bbox.min_lon - bbox.max_lon)
-        else:
-            total_lon_span = bbox.max_lon - bbox.min_lon
-        total_lat_span = bbox.max_lat - bbox.min_lat
-
-        is_planetary = (
-            total_lon_span >= 120.0
-            or total_lat_span >= 70.0
-            or (total_lon_span * total_lat_span >= 6000.0)
-        )
-
-        if is_planetary:
-            intersecting_belts = [
-                b for b in REPRESENTATIVE_GLOBAL_BELTS if bbox_intersects(bbox, b)
-            ]
-            selected_tiles = intersecting_belts if intersecting_belts else list(REPRESENTATIVE_GLOBAL_BELTS)
-            warning = (
-                f"Planetary Overview ({len(selected_tiles)} sub-tiles): Query spanned planet-scale footprint "
-                f"({total_lon_span:.1f}° x {total_lat_span:.1f}°) and was partitioned into representative "
-                f"wildfire monitoring belts (<= {max_tile_deg}°x{max_tile_deg}° each) to comply with NASA FIRMS constraints."
-            )
-            return selected_tiles, warning
-
-        raw_boxes: List[Tuple[float, float, float, float]] = []
-
-        # Check Antimeridian crossing (west > east)
-        if bbox.min_lon > bbox.max_lon:
-            raw_boxes.append((bbox.min_lon, bbox.min_lat, 180.0, bbox.max_lat))
-            raw_boxes.append((-180.0, bbox.min_lat, bbox.max_lon, bbox.max_lat))
-        else:
-            raw_boxes.append((bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat))
-
-        tiles: List[BoundingBox] = []
-        is_tiled = False
-        is_capped = False
-
-        for (w, s, e, n) in raw_boxes:
-            lon_span = abs(e - w)
-            lat_span = abs(n - s)
-
-            if lon_span <= max_tile_deg and lat_span <= max_tile_deg:
-                tiles.append(BoundingBox(min_lon=w, min_lat=s, max_lon=e, max_lat=n))
-            else:
-                is_tiled = True
-                n_lon = max(1, math.ceil(lon_span / max_tile_deg))
-                n_lat = max(1, math.ceil(lat_span / max_tile_deg))
-
-                if n_lon * n_lat <= max_tiles:
-                    d_lon = lon_span / n_lon
-                    d_lat = lat_span / n_lat
-                    for i in range(n_lon):
-                        tile_w = w + i * d_lon
-                        tile_e = e if i == n_lon - 1 else tile_w + d_lon
-                        for j in range(n_lat):
-                            tile_s = s + j * d_lat
-                            tile_n = n if j == n_lat - 1 else tile_s + d_lat
-                            tiles.append(
-                                BoundingBox(
-                                    min_lon=round(tile_w, 4),
-                                    min_lat=round(tile_s, 4),
-                                    max_lon=round(tile_e, 4),
-                                    max_lat=round(tile_n, 4),
-                                )
-                            )
-                else:
-                    is_capped = True
-                    # Cap tile grid count while strictly preserving tile size <= max_tile_deg
-                    k_lon = max(1, min(n_lon, int(math.isqrt(max_tiles))))
-                    k_lat = max(1, min(n_lat, max_tiles // k_lon))
-                    tile_w_deg = min(max_tile_deg, lon_span)
-                    tile_h_deg = min(max_tile_deg, lat_span)
-                    step_lon = (lon_span - tile_w_deg) / (k_lon - 1) if k_lon > 1 else 0.0
-                    step_lat = (lat_span - tile_h_deg) / (k_lat - 1) if k_lat > 1 else 0.0
-                    for i in range(k_lon):
-                        cur_w = w + i * step_lon
-                        cur_e = cur_w + tile_w_deg
-                        for j in range(k_lat):
-                            cur_s = s + j * step_lat
-                            cur_n = cur_s + tile_h_deg
-                            tiles.append(
-                                BoundingBox(
-                                    min_lon=round(cur_w, 4),
-                                    min_lat=round(cur_s, 4),
-                                    max_lon=round(cur_e, 4),
-                                    max_lat=round(cur_n, 4),
-                                )
-                            )
-
-        warning: Optional[str] = None
-        if is_tiled or bbox.min_lon > bbox.max_lon:
-            if is_capped:
-                warning = (
-                    f"Large Area of Interest ({len(tiles)} sub-tiles): The requested query exceeded "
-                    f"the maximum single query footprint and was partitioned into {len(tiles)} sub-tiles "
-                    f"(<= {max_tile_deg}°x{max_tile_deg}° each) to comply with NASA FIRMS API rate limits."
-                )
-            elif bbox.min_lon > bbox.max_lon:
-                warning = (
-                    f"Antimeridian crossing detected ({bbox.min_lon}° to {bbox.max_lon}°): "
-                    f"Query was split into {len(tiles)} sub-tiles across the International Date Line."
-                )
-            else:
-                warning = (
-                    f"Large Area of Interest: Query footprint was partitioned into {len(tiles)} sub-tiles "
-                    f"(<= {max_tile_deg}°x{max_tile_deg}° each) to comply with NASA FIRMS Area API constraints."
-                )
-
-        return tiles, warning
-
     def fetch_area_observations(
         self,
         bbox: BoundingBox,
         day_range: int = 3,
         sources: Optional[List[str]] = None,
-    ) -> Tuple[List[Observation], Optional[str]]:
+    ) -> List[Observation]:
         """
         Queries the NASA FIRMS Area API for all active fire observations in the specified
         bounding box over the requested day range across MODIS and VIIRS satellite sensors.
-        Handles planetary scale overviews, antimeridian crossings, large bounding box tiling (<= 20° x 20°),
-        parallel fetching across sensor-tile workers with connection pooling, and duplicate observation pruning.
-        Returns (observations, diagnostic_warning).
         """
         map_key = self._require_map_key()
+        active_sources = sources or DEFAULT_FIRMS_SOURCES
         clamped_day_range = max(1, min(5, int(day_range)))
 
-        tiles, warning = self.decompose_bbox(bbox)
-        if warning:
-            logger.warning(f"[FIRMS API Tiling] {warning}")
+        all_observations: List[Observation] = []
+        sensor_counts: Dict[str, int] = {}
 
-        # Check if planetary footprint
-        if bbox.min_lon > bbox.max_lon:
-            total_lon_span = 360.0 - (bbox.min_lon - bbox.max_lon)
-        else:
-            total_lon_span = bbox.max_lon - bbox.min_lon
-        total_lat_span = bbox.max_lat - bbox.min_lat
-        is_planetary = (
-            total_lon_span >= 120.0
-            or total_lat_span >= 70.0
-            or (total_lon_span * total_lat_span >= 6000.0)
-        )
-
-        # Sensor selection
-        if sources:
-            active_sources = sources
-        elif is_planetary:
-            # For planetary overview queries, select primary high-yield sensors for fast round-trips
-            # VIIRS NOAA-20 (375m) + MODIS (1km) provides instant multi-sensor cross-validation worldwide
-            active_sources = ["MODIS_NRT", "VIIRS_NOAA20_NRT"]
-        else:
-            active_sources = DEFAULT_FIRMS_SOURCES
-
-        tasks: List[Tuple[str, BoundingBox]] = []
-        for tile in tiles:
+        with httpx.Client(timeout=25.0) as client:
             for source in active_sources:
-                tasks.append((source, tile))
-
-        limits = httpx.Limits(max_keepalive_connections=15, max_connections=25)
-        timeout_cfg = (
-            httpx.Timeout(connect=8.0, read=15.0, write=8.0, pool=8.0)
-            if is_planetary
-            else httpx.Timeout(connect=10.0, read=25.0, write=10.0, pool=10.0)
-        )
-
-        with httpx.Client(timeout=timeout_cfg, limits=limits) as client:
-            def _fetch_single_task(source: str, tile: BoundingBox) -> List[Observation]:
-                url = self._build_url(map_key, source, tile, clamped_day_range)
+                url = self._build_url(map_key, source, bbox, clamped_day_range)
                 masked_url = mask_map_key(url)
-                logger.info(f"[FIRMS API] Querying {source} tile [{tile.min_lon},{tile.min_lat},{tile.max_lon},{tile.max_lat}]: {masked_url}")
+                logger.info(f"[FIRMS API] Querying {source}: {masked_url}")
+
                 try:
                     resp = client.get(url)
                 except httpx.RequestError as exc:
                     logger.error(f"[FIRMS API] Network request error connecting to {masked_url}: {exc}")
-                    if len(tasks) > 1:
-                        return []
                     raise HTTPException(
                         status_code=502,
                         detail=f"Failed to reach NASA FIRMS server: {exc}",
@@ -509,56 +312,25 @@ class FirmsClient:
                 if resp.status_code != 200:
                     preview = resp.text[:200]
                     logger.error(f"[FIRMS API] Error HTTP {resp.status_code} from {masked_url}: {preview}")
-                    if len(tasks) > 1:
-                        return []
                     raise HTTPException(
                         status_code=502,
                         detail=f"NASA FIRMS API returned HTTP {resp.status_code}: {preview}",
                     )
 
                 obs_list = self.parse_firms_csv_to_observations(resp.text, source)
-                logger.info(f"[FIRMS API] Sensor {source} tile returned {len(obs_list)} valid observations.")
-                return obs_list
+                sensor_counts[source] = len(obs_list)
+                logger.info(f"[FIRMS API] Sensor {source} returned {len(obs_list)} valid observations.")
+                all_observations.extend(obs_list)
 
-            all_observations: List[Observation] = []
-            max_workers = min(6, max(1, len(tasks))) if is_planetary else min(10, max(1, len(tasks)))
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_task = {
-                    executor.submit(_fetch_single_task, s, t): (s, t)
-                    for s, t in tasks
-                }
-                for future in as_completed(future_to_task):
-                    try:
-                        obs_list = future.result()
-                        all_observations.extend(obs_list)
-                    except Exception as exc:
-                        source, tile = future_to_task[future]
-                        logger.error(f"[FIRMS API Task Failed] {source} on tile: {exc}")
-                        if len(tasks) == 1:
-                            raise
-
-        # Deduplicate overlapping detections across adjacent tiles
-        dedup_dict: Dict[Tuple[float, float, Any, str, str], Observation] = {}
-        for o in all_observations:
-            key = (
-                round(float(o.latitude), 4),
-                round(float(o.longitude), 4),
-                o.acq_datetime,
-                str(o.instrument).upper(),
-                str(o.satellite),
-            )
-            if key not in dedup_dict or (o.frp or 0.0) > (dedup_dict[key].frp or 0.0):
-                dedup_dict[key] = o
-
-        unique_observations = list(dedup_dict.values())
-        modis_count = sum(1 for o in unique_observations if o.instrument == "MODIS")
-        viirs_count = sum(1 for o in unique_observations if o.instrument == "VIIRS")
+        modis_count = sum(1 for o in all_observations if o.instrument == "MODIS")
+        viirs_count = sum(1 for o in all_observations if o.instrument == "VIIRS")
         logger.info(
-            f"[FIRMS API Aggregation] Completed query ({len(tiles)} tiles, {len(tasks)} requests): "
-            f"MODIS={modis_count}, VIIRS={viirs_count}, Unique Total={len(unique_observations)}."
+            f"[FIRMS API Aggregation] Completed live query: "
+            f"MODIS={modis_count}, VIIRS={viirs_count}, Total={len(all_observations)} "
+            f"across {len(active_sources)} sensor feeds."
         )
 
-        return unique_observations, warning
+        return all_observations
 
     def health_check_live(self) -> Dict[str, Any]:
         """

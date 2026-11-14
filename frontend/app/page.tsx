@@ -46,7 +46,6 @@ export default function DisasterResponseDashboard() {
   const [backendHealthy, setBackendHealthy] = useState(true);
   const [totalDbRecords, setTotalDbRecords] = useState(0);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
-  const [warningNotice, setWarningNotice] = useState<string | null>(null);
 
   // Tracks active in-flight harmonization to cancel superseded requests
   const activeHarmonizeAbortRef = useRef<AbortController | null>(null);
@@ -63,7 +62,6 @@ export default function DisasterResponseDashboard() {
 
       setLoading(true);
       setErrorNotice(null);
-      setWarningNotice(null);
 
       const targetBbox = overrideParams?.bbox ?? bbox;
 
@@ -104,7 +102,6 @@ export default function DisasterResponseDashboard() {
               }
         );
         setNoisePoints(Array.isArray(result?.noise_points) ? [...result.noise_points] : []);
-        setWarningNotice(result?.notice || result?.warning || null);
       } catch (err: any) {
         // If superseded by a newer query or manually aborted, silently ignore
         if (controller.signal.aborted || err?.message?.includes('aborted')) {
@@ -226,19 +223,6 @@ export default function DisasterResponseDashboard() {
                 <button
                   onClick={() => setErrorNotice(null)}
                   className="px-2 py-0.5 rounded bg-rose-900/60 hover:bg-rose-800 text-xs text-rose-200 font-semibold border border-rose-700/60"
-                >
-                  Dismiss
-                </button>
-              </div>
-            )}
-
-            {warningNotice && !errorNotice && (
-              <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[1500] max-w-xl px-4 py-2 bg-amber-950/90 border border-amber-500/80 text-amber-200 text-xs rounded-xl backdrop-blur-md shadow-2xl flex items-center gap-3 animate-fade-in">
-                <span className="font-semibold text-amber-300">ℹ️ Sector Notice:</span>
-                <span className="flex-1 font-mono text-[11px] break-words">{warningNotice}</span>
-                <button
-                  onClick={() => setWarningNotice(null)}
-                  className="px-2 py-0.5 rounded bg-amber-900/60 hover:bg-amber-800 text-xs text-amber-200 font-semibold border border-amber-700/60"
                 >
                   Dismiss
                 </button>

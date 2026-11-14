@@ -40,7 +40,6 @@ export const DEFAULT_DARK_STYLE =
 
 export const ESRI_SATELLITE_STYLE: maplibregl.StyleSpecification = {
   version: 8,
-  glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
   sources: {
     'esri-satellite': {
       type: 'raster',
@@ -63,7 +62,6 @@ export const ESRI_SATELLITE_STYLE: maplibregl.StyleSpecification = {
 
 export const OSM_RASTER_STYLE: maplibregl.StyleSpecification = {
   version: 8,
-  glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
   sources: {
     'osm-tiles': {
       type: 'raster',
@@ -357,24 +355,16 @@ export default function DisasterMap({
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
-    const isInitialWorld =
-      Math.abs(bbox.max_lon - bbox.min_lon) >= 300 ||
-      (bbox.min_lon <= -170 && bbox.max_lon >= 170);
-    const initialCenter: [number, number] = isInitialWorld
-      ? [15.0, 10.0]
-      : [
-          (bbox.min_lon + bbox.max_lon) / 2,
-          (bbox.min_lat + bbox.max_lat) / 2,
-        ];
-    const initialZoom = isInitialWorld ? 1.8 : 7;
+    const initialCenter: [number, number] = [
+      (bbox.min_lon + bbox.max_lon) / 2,
+      (bbox.min_lat + bbox.max_lat) / 2,
+    ];
 
     const map = new maplibregl.Map({
       container: mapContainerRef.current,
       style: DEFAULT_DARK_STYLE,
       center: initialCenter,
-      zoom: initialZoom,
-      minZoom: 1,
-      maxZoom: 19,
+      zoom: 7,
       attributionControl: false,
     });
 
@@ -550,63 +540,26 @@ export default function DisasterMap({
     const renderBbox = () => {
       if (!map.isStyleLoaded()) return;
 
-      const features: GeoJSON.Feature[] = [];
-      if (bbox.min_lon > bbox.max_lon) {
-        // Antimeridian crossing: split into two visual polygons across +/-180°
-        features.push({
-          type: 'Feature',
-          geometry: {
-            type: 'Polygon',
-            coordinates: [
-              [
-                [bbox.min_lon, bbox.min_lat],
-                [180, bbox.min_lat],
-                [180, bbox.max_lat],
-                [bbox.min_lon, bbox.max_lat],
-                [bbox.min_lon, bbox.min_lat],
-              ],
-            ],
-          },
-          properties: {},
-        });
-        features.push({
-          type: 'Feature',
-          geometry: {
-            type: 'Polygon',
-            coordinates: [
-              [
-                [-180, bbox.min_lat],
-                [bbox.max_lon, bbox.min_lat],
-                [bbox.max_lon, bbox.max_lat],
-                [-180, bbox.max_lat],
-                [-180, bbox.min_lat],
-              ],
-            ],
-          },
-          properties: {},
-        });
-      } else {
-        features.push({
-          type: 'Feature',
-          geometry: {
-            type: 'Polygon',
-            coordinates: [
-              [
-                [bbox.min_lon, bbox.min_lat],
-                [bbox.max_lon, bbox.min_lat],
-                [bbox.max_lon, bbox.max_lat],
-                [bbox.min_lon, bbox.max_lat],
-                [bbox.min_lon, bbox.min_lat],
-              ],
-            ],
-          },
-          properties: {},
-        });
-      }
-
       const bboxGeoJson: GeoJSON.FeatureCollection = {
         type: 'FeatureCollection',
-        features,
+        features: [
+          {
+            type: 'Feature',
+            geometry: {
+              type: 'Polygon',
+              coordinates: [
+                [
+                  [bbox.min_lon, bbox.min_lat],
+                  [bbox.max_lon, bbox.min_lat],
+                  [bbox.max_lon, bbox.max_lat],
+                  [bbox.min_lon, bbox.max_lat],
+                  [bbox.min_lon, bbox.min_lat],
+                ],
+              ],
+            },
+            properties: {},
+          },
+        ],
       };
 
       safeUpdateGeoJsonSource(map, 'bbox-source', bboxGeoJson);
@@ -778,528 +731,107 @@ export default function DisasterMap({
     };
   }, [safeClusters, onSelectCluster, styleEpoch, isPerimetersVisible]);
 
-  // Tactical Popup HTML Generator
-  const getClusterPopupHtml = useCallback((cluster: HarmonizedCluster) => {
-    return `
-      <div class="p-2 min-w-[240px] text-slate-100 bg-slate-900 rounded-lg border border-slate-700 shadow-xl font-sans text-xs">
-        <div class="flex items-center justify-between pb-1 mb-2 border-b border-slate-800">
-          <span class="font-bold text-sm tracking-wide text-white">Event #${cluster.cluster_id}</span>
-          ${cluster.cross_validated
-            ? '<span class="px-1.5 py-0.5 text-[10px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 rounded">M+V Cross-Validated</span>'
-            : '<span class="px-1.5 py-0.5 text-[10px] font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/40 rounded">Single Sensor</span>'
-          }
-        </div>
-        <div class="space-y-1.5">
-          <div class="flex justify-between">
-            <span class="text-slate-400">Total FRP:</span>
-            <span class="font-semibold text-rose-400">${(cluster.total_frp ?? 0).toFixed(1)} MW</span>
-          </div>
-          <div class="flex justify-between">
-            <span class="text-slate-400">Harmonized Confidence:</span>
-            <span class="font-semibold text-emerald-400">${(cluster.harmonized_confidence ?? 0).toFixed(1)}%</span>
-          </div>
-          <div class="flex justify-between">
-            <span class="text-slate-400">Est. Footprint Area:</span>
-            <span class="font-semibold text-cyan-400">${(cluster.estimated_area_km2 ?? 0).toFixed(2)} km²</span>
-          </div>
-          <div class="flex justify-between">
-            <span class="text-slate-400">Sensor Detections:</span>
-            <span class="font-mono text-slate-200">
-              <span class="text-purple-400">${cluster.modis_count ?? 0} MODIS</span> + 
-              <span class="text-cyan-400">${cluster.viirs_count ?? 0} VIIRS</span> (${cluster.total_detections ?? 0} total)
-            </span>
-          </div>
-          <div class="flex justify-between">
-            <span class="text-slate-400">Duration:</span>
-            <span class="font-semibold text-slate-300">${(cluster.duration_hours ?? 0).toFixed(1)} hrs</span>
-          </div>
-          <div class="pt-1 text-[10px] text-slate-500">
-            First detected: ${formatUtcTime(cluster.first_detected)}
-          </div>
-        </div>
-      </div>
-    `;
-  }, []);
-
-  // 5. Cluster Tactical FRP Beacon Markers with Popups & Large-Dataset Clustering (>300 points)
+  // 5. Cluster Tactical FRP Beacon Markers with Popups
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
 
-    // Helper to cleanup clustered GeoJSON layers
-    const removeClusteredLayers = () => {
-      safeRemoveLayer(map, 'cluster-count');
-      safeRemoveLayer(map, 'cluster-bubbles');
-      safeRemoveLayer(map, 'unclustered-beacon');
-      safeRemoveLayer(map, 'unclustered-glow');
-      safeRemoveSource(map, 'cluster-hotspots-source');
-    };
+    // Clear existing markers
+    markersRef.current.forEach((m) => m.remove());
+    markersRef.current = [];
 
-    // Helper to cleanup DOM markers
-    const removeDomMarkers = () => {
-      markersRef.current.forEach((m) => m.remove());
-      markersRef.current = [];
-    };
+    safeClusters.forEach((cluster) => {
+      const isSelected = selectedClusterId === cluster.cluster_id;
+      const frpColor = getFrpColor(cluster.total_frp);
+      const size = Math.min(46, Math.max(26, Math.round(Math.sqrt(cluster.total_frp) * 2.2)));
+      const pulseSize = size + 16;
 
-    const renderMarkers = () => {
-      if (!map.isStyleLoaded()) return;
+      const markerEl = document.createElement('div');
+      markerEl.className = 'custom-fire-marker cursor-pointer select-none';
+      markerEl.style.width = `${pulseSize}px`;
+      markerEl.style.height = `${pulseSize}px`;
 
-      try {
-        if (!safeClusters.length) {
-          removeDomMarkers();
-          removeClusteredLayers();
-          return;
-        }
+      markerEl.innerHTML = `
+        <div class="relative flex items-center justify-center w-full h-full group">
+          <!-- Radar beacon pulse ring -->
+          <div class="absolute inset-0 rounded-full animate-ping opacity-30" style="background-color: ${frpColor};"></div>
+          <!-- Outer glowing circle -->
+          <div class="absolute rounded-full border shadow-lg ${isSelected ? 'ring-2 ring-white scale-110' : ''}" 
+               style="width: ${size}px; height: ${size}px; background: radial-gradient(circle, ${frpColor}EE 30%, ${frpColor}88 80%); border-color: ${frpColor};">
+          </div>
+          <!-- Center Tactical Symbol / Multi-Sensor Indicator -->
+          <div class="relative z-10 flex flex-col items-center justify-center text-[10px] font-bold text-white leading-none">
+            ${cluster.cross_validated ? '<span class="text-[9px] tracking-tight">M+V</span>' : '<span>⚡</span>'}
+            <span class="text-[8px] opacity-90">${Math.round(cluster.total_frp)}</span>
+          </div>
+        </div>
+      `;
 
-        // For large datasets (> 300 points), use MapLibre GeoJSON clustering for 60 FPS performance and cluster bubbles
-        if (safeClusters.length > 300) {
-          removeDomMarkers();
-
-          const pointFeatures: GeoJSON.Feature[] = [];
-          safeClusters.forEach((cluster) => {
-            const markerLat = cluster.weighted_centroid_lat ?? cluster.centroid_lat;
-            const markerLon = cluster.weighted_centroid_lon ?? cluster.centroid_lon;
-
-            // Guard against invalid/NaN/null coordinates
-            if (
-              typeof markerLat !== 'number' ||
-              isNaN(markerLat) ||
-              typeof markerLon !== 'number' ||
-              isNaN(markerLon) ||
-              markerLat < -90 ||
-              markerLat > 90 ||
-              markerLon < -180 ||
-              markerLon > 180
-            ) {
-              return;
+      // Tactical Popup
+      const popupContent = `
+        <div class="p-2 min-w-[240px] text-slate-100 bg-slate-900 rounded-lg border border-slate-700 shadow-xl font-sans text-xs">
+          <div class="flex items-center justify-between pb-1 mb-2 border-b border-slate-800">
+            <span class="font-bold text-sm tracking-wide text-white">Event #${cluster.cluster_id}</span>
+            ${cluster.cross_validated
+              ? '<span class="px-1.5 py-0.5 text-[10px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 rounded">M+V Cross-Validated</span>'
+              : '<span class="px-1.5 py-0.5 text-[10px] font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/40 rounded">Single Sensor</span>'
             }
+          </div>
+          <div class="space-y-1.5">
+            <div class="flex justify-between">
+              <span class="text-slate-400">Total FRP:</span>
+              <span class="font-semibold text-rose-400">${cluster.total_frp.toFixed(1)} MW</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Harmonized Confidence:</span>
+              <span class="font-semibold text-emerald-400">${cluster.harmonized_confidence.toFixed(1)}%</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Est. Footprint Area:</span>
+              <span class="font-semibold text-cyan-400">${cluster.estimated_area_km2.toFixed(2)} km²</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Sensor Detections:</span>
+              <span class="font-mono text-slate-200">
+                <span class="text-purple-400">${cluster.modis_count} MODIS</span> + 
+                <span class="text-cyan-400">${cluster.viirs_count} VIIRS</span> (${cluster.total_detections} total)
+              </span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Duration:</span>
+              <span class="font-semibold text-slate-300">${cluster.duration_hours.toFixed(1)} hrs</span>
+            </div>
+            <div class="pt-1 text-[10px] text-slate-500">
+              First detected: ${formatUtcTime(cluster.first_detected)}
+            </div>
+          </div>
+        </div>
+      `;
 
-            const isSelected = selectedClusterId === cluster.cluster_id;
-            const frpColor = getFrpColor(cluster.total_frp ?? 0);
-
-            pointFeatures.push({
-              type: 'Feature',
-              geometry: {
-                type: 'Point',
-                coordinates: [markerLon, markerLat],
-              },
-              properties: {
-                cluster_id: cluster.cluster_id,
-                total_frp: cluster.total_frp ?? 0,
-                color: frpColor,
-                selected: isSelected,
-                cross_validated: Boolean(cluster.cross_validated),
-              },
-            });
-          });
-
-          const geojsonData: GeoJSON.FeatureCollection = {
-            type: 'FeatureCollection',
-            features: pointFeatures,
-          };
-
-          const existingSource = map.getSource('cluster-hotspots-source') as maplibregl.GeoJSONSource | undefined;
-          if (existingSource) {
-            existingSource.setData(geojsonData);
-          } else {
-            map.addSource('cluster-hotspots-source', {
-              type: 'geojson',
-              data: geojsonData,
-              cluster: true,
-              clusterRadius: 50,
-              clusterMaxZoom: 14,
-            });
-          }
-
-          // 1. Clustered Bubbles Layer
-          safeAddLayer(map, {
-            id: 'cluster-bubbles',
-            type: 'circle',
-            source: 'cluster-hotspots-source',
-            filter: ['has', 'point_count'],
-            paint: {
-              'circle-color': [
-                'step',
-                ['get', 'point_count'],
-                '#EA580C',
-                20,
-                '#E11D48',
-                100,
-                '#BE123C',
-                300,
-                '#991B1B',
-              ],
-              'circle-radius': [
-                'step',
-                ['get', 'point_count'],
-                16,
-                20,
-                20,
-                100,
-                25,
-                300,
-                32,
-              ],
-              'circle-stroke-width': 2,
-              'circle-stroke-color': '#FFFFFF',
-              'circle-opacity': 0.88,
-            },
-          });
-
-          // 2. Clustered Count Text Badge
-          safeAddLayer(map, {
-            id: 'cluster-count',
-            type: 'symbol',
-            source: 'cluster-hotspots-source',
-            filter: ['has', 'point_count'],
-            layout: {
-              'text-field': '{point_count_abbreviated}',
-              'text-size': 12,
-              'text-allow-overlap': true,
-              'text-ignore-placement': true,
-            },
-            paint: {
-              'text-color': '#FFFFFF',
-            },
-          });
-
-          // 3. Unclustered Outer Glow Halo (when zoomed in or isolated)
-          safeAddLayer(map, {
-            id: 'unclustered-glow',
-            type: 'circle',
-            source: 'cluster-hotspots-source',
-            filter: ['!', ['has', 'point_count']],
-            paint: {
-              'circle-color': ['get', 'color'],
-              'circle-radius': [
-                'interpolate',
-                ['linear'],
-                ['zoom'],
-                2, 8,
-                7, 14,
-                12, 20,
-              ],
-              'circle-opacity': 0.35,
-              'circle-blur': 0.6,
-            },
-          });
-
-          // 4. Unclustered Inner Tactical Beacon
-          safeAddLayer(map, {
-            id: 'unclustered-beacon',
-            type: 'circle',
-            source: 'cluster-hotspots-source',
-            filter: ['!', ['has', 'point_count']],
-            paint: {
-              'circle-color': ['get', 'color'],
-              'circle-radius': ['case', ['get', 'selected'], 9, 6],
-              'circle-stroke-width': ['case', ['get', 'selected'], 3, 1.5],
-              'circle-stroke-color': ['case', ['get', 'selected'], '#FFFFFF', 'rgba(255,255,255,0.75)'],
-              'circle-opacity': 0.95,
-            },
-          });
-        } else {
-          // Regional datasets (<= 300 points): Keep exact DOM markers for pixel-perfect tactical radar styling
-          removeClusteredLayers();
-          removeDomMarkers();
-
-          safeClusters.forEach((cluster) => {
-            const markerLat = cluster.weighted_centroid_lat ?? cluster.centroid_lat;
-            const markerLon = cluster.weighted_centroid_lon ?? cluster.centroid_lon;
-
-            // Guard against invalid coordinates
-            if (
-              typeof markerLat !== 'number' ||
-              isNaN(markerLat) ||
-              typeof markerLon !== 'number' ||
-              isNaN(markerLon) ||
-              markerLat < -90 ||
-              markerLat > 90 ||
-              markerLon < -180 ||
-              markerLon > 180
-            ) {
-              return;
-            }
-
-            const isSelected = selectedClusterId === cluster.cluster_id;
-            const frpColor = getFrpColor(cluster.total_frp ?? 0);
-            const size = Math.min(46, Math.max(26, Math.round(Math.sqrt(cluster.total_frp ?? 0) * 2.2)));
-            const pulseSize = size + 16;
-
-            const markerEl = document.createElement('div');
-            markerEl.className = 'custom-fire-marker cursor-pointer select-none';
-            markerEl.style.width = `${pulseSize}px`;
-            markerEl.style.height = `${pulseSize}px`;
-
-            markerEl.innerHTML = `
-              <div class="relative flex items-center justify-center w-full h-full group">
-                <!-- Radar beacon pulse ring -->
-                <div class="absolute inset-0 rounded-full animate-ping opacity-30" style="background-color: ${frpColor};"></div>
-                <!-- Outer glowing circle -->
-                <div class="absolute rounded-full border shadow-lg ${isSelected ? 'ring-2 ring-white scale-110' : ''}" 
-                     style="width: ${size}px; height: ${size}px; background: radial-gradient(circle, ${frpColor}EE 30%, ${frpColor}88 80%); border-color: ${frpColor};">
-                </div>
-                <!-- Center Tactical Symbol / Multi-Sensor Indicator -->
-                <div class="relative z-10 flex flex-col items-center justify-center text-[10px] font-bold text-white leading-none">
-                  ${cluster.cross_validated ? '<span class="text-[9px] tracking-tight">M+V</span>' : '<span>⚡</span>'}
-                  <span class="text-[8px] opacity-90">${Math.round(cluster.total_frp ?? 0)}</span>
-                </div>
-              </div>
-            `;
-
-            const popup = new maplibregl.Popup({
-              offset: [0, -10],
-              className: 'tactical-maplibre-popup',
-              closeButton: true,
-              maxWidth: '300px',
-            }).setHTML(getClusterPopupHtml(cluster));
-
-            const marker = new maplibregl.Marker({
-              element: markerEl,
-            })
-              .setLngLat([markerLon, markerLat])
-              .setPopup(popup)
-              .addTo(map);
-
-            markerEl.addEventListener('click', () => {
-              onSelectCluster(cluster);
-            });
-
-            markersRef.current.push(marker);
-          });
-        }
-      } catch (err) {
-        console.error('[MapLibre] Error rendering markers layer:', err);
-      }
-    };
-
-    if (map.isStyleLoaded()) {
-      renderMarkers();
-    } else {
-      map.once('style.load', renderMarkers);
-      return () => {
-        map.off('style.load', renderMarkers);
-      };
-    }
-  }, [safeClusters, selectedClusterId, onSelectCluster, styleEpoch, getClusterPopupHtml]);
-
-  // Click & hover interactions for clustered GeoJSON layers (>300 points)
-  useEffect(() => {
-    const map = mapInstanceRef.current;
-    if (!map || safeClusters.length <= 300) return;
-
-    const onClusterClick = (e: maplibregl.MapLayerMouseEvent) => {
-      const features = map.queryRenderedFeatures(e.point, { layers: ['cluster-bubbles'] });
-      const clusterFeature = features[0];
-      if (!clusterFeature) return;
-      const clusterId = clusterFeature.properties?.cluster_id;
-      const source = map.getSource('cluster-hotspots-source') as maplibregl.GeoJSONSource;
-      if (source && typeof source.getClusterExpansionZoom === 'function') {
-        Promise.resolve(source.getClusterExpansionZoom(clusterId))
-          .then((zoom) => {
-            const coords = (clusterFeature.geometry as any).coordinates;
-            map.easeTo({
-              center: coords,
-              zoom: Math.min(zoom + 0.5, 16),
-              duration: 600,
-            });
-          })
-          .catch((err) => {
-            console.warn('[MapLibre] Expansion zoom error:', err);
-          });
-      }
-    };
-
-    const onClusterEnter = () => {
-      map.getCanvas().style.cursor = 'pointer';
-    };
-    const onClusterLeave = () => {
-      map.getCanvas().style.cursor = '';
-    };
-
-    const onUnclusteredClick = (e: maplibregl.MapLayerMouseEvent) => {
-      const feature = e.features?.[0];
-      if (!feature?.properties) return;
-      const clusterId = Number(feature.properties.cluster_id);
-      const found = safeClusters.find((c) => c.cluster_id === clusterId);
-      if (found) {
-        onSelectCluster(found);
-      }
-    };
-
-    const onUnclusteredEnter = (e: maplibregl.MapLayerMouseEvent) => {
-      map.getCanvas().style.cursor = 'pointer';
-      const feature = e.features?.[0];
-      if (!feature?.properties) return;
-      const clusterId = Number(feature.properties.cluster_id);
-      const found = safeClusters.find((c) => c.cluster_id === clusterId);
-      if (found) {
-        const coords = (feature.geometry as any).coordinates.slice();
-        if (hoverPopupRef.current) {
-          hoverPopupRef.current.remove();
-        }
-        const popup = new maplibregl.Popup({
-          offset: [0, -10],
-          className: 'tactical-maplibre-popup',
-          closeButton: false,
-          maxWidth: '300px',
-        })
-          .setLngLat(coords)
-          .setHTML(getClusterPopupHtml(found))
-          .addTo(map);
-
-        hoverPopupRef.current = popup;
-      }
-    };
-
-    const onUnclusteredLeave = () => {
-      map.getCanvas().style.cursor = '';
-      if (hoverPopupRef.current) {
-        hoverPopupRef.current.remove();
-        hoverPopupRef.current = null;
-      }
-    };
-
-    const setupListeners = () => {
-      if (map.getLayer('cluster-bubbles')) {
-        map.on('click', 'cluster-bubbles', onClusterClick);
-        map.on('mouseenter', 'cluster-bubbles', onClusterEnter);
-        map.on('mouseleave', 'cluster-bubbles', onClusterLeave);
-      }
-      if (map.getLayer('unclustered-beacon')) {
-        map.on('click', 'unclustered-beacon', onUnclusteredClick);
-        map.on('mouseenter', 'unclustered-beacon', onUnclusteredEnter);
-        map.on('mouseleave', 'unclustered-beacon', onUnclusteredLeave);
-      }
-    };
-
-    if (map.isStyleLoaded()) {
-      setupListeners();
-    } else {
-      map.once('style.load', setupListeners);
-    }
-
-    return () => {
-      if (map.getLayer('cluster-bubbles')) {
-        map.off('click', 'cluster-bubbles', onClusterClick);
-        map.off('mouseenter', 'cluster-bubbles', onClusterEnter);
-        map.off('mouseleave', 'cluster-bubbles', onClusterLeave);
-      }
-      if (map.getLayer('unclustered-beacon')) {
-        map.off('click', 'unclustered-beacon', onUnclusteredClick);
-        map.off('mouseenter', 'unclustered-beacon', onUnclusteredEnter);
-        map.off('mouseleave', 'unclustered-beacon', onUnclusteredLeave);
-      }
-    };
-  }, [safeClusters, onSelectCluster, styleEpoch, getClusterPopupHtml]);
-
-  // Auto-fit map to harmonized results on new results arrival
-  const prevClustersRef = useRef<HarmonizedCluster[] | null>(null);
-
-  useEffect(() => {
-    const map = mapInstanceRef.current;
-    if (!map || !safeClusters.length) return;
-
-    if (safeClusters === prevClustersRef.current) return;
-    prevClustersRef.current = safeClusters;
-
-    const fitToResults = () => {
-      try {
-        map.resize();
-
-        let minLon = 180, maxLon = -180, minLat = 90, maxLat = -90;
-        let validCount = 0;
-
-        for (const cluster of safeClusters) {
-          const lat = cluster.weighted_centroid_lat ?? cluster.centroid_lat;
-          const lon = cluster.weighted_centroid_lon ?? cluster.centroid_lon;
-          if (
-            typeof lat === 'number' && !isNaN(lat) &&
-            typeof lon === 'number' && !isNaN(lon) &&
-            lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180
-          ) {
-            if (lon < minLon) minLon = lon;
-            if (lon > maxLon) maxLon = lon;
-            if (lat < minLat) minLat = lat;
-            if (lat > maxLat) maxLat = lat;
-            validCount++;
-          }
-        }
-
-        if (validCount === 0) return;
-
-        const lonSpan = maxLon - minLon;
-        const isWorldScale = lonSpan > 180 || (bbox.min_lon <= -170 && bbox.max_lon >= 170);
-
-        if (isWorldScale) {
-          map.easeTo({
-            center: [15, 10],
-            zoom: 1.8,
-            duration: 800,
-          });
-        } else {
-          map.fitBounds(
-            [
-              [Math.max(-175, minLon), Math.max(-85, minLat)],
-              [Math.min(175, maxLon), Math.min(85, maxLat)],
-            ],
-            {
-              padding: { top: 60, bottom: 60, left: 60, right: 60 },
-              maxZoom: 6,
-              duration: 800,
-            }
-          );
-        }
-      } catch (err) {
-        console.warn('[MapLibre] Auto-fit to clusters failed:', err);
-      }
-    };
-
-    if (map.isStyleLoaded()) {
-      fitToResults();
-    } else {
-      map.once('style.load', fitToResults);
-    }
-  }, [safeClusters, bbox]);
-
-  // Zoom and highlight selected cluster when clicked from sidebar or map
-  useEffect(() => {
-    const map = mapInstanceRef.current;
-    if (!map || selectedClusterId === null) return;
-
-    const found = safeClusters.find((c) => c.cluster_id === selectedClusterId);
-    if (!found) return;
-
-    const lat = found.weighted_centroid_lat ?? found.centroid_lat;
-    const lon = found.weighted_centroid_lon ?? found.centroid_lon;
-    if (typeof lat !== 'number' || isNaN(lat) || typeof lon !== 'number' || isNaN(lon)) return;
-
-    try {
-      const currentZoom = map.getZoom();
-      map.easeTo({
-        center: [lon, lat],
-        zoom: Math.max(currentZoom, 8),
-        duration: 800,
-      });
-
-      if (hoverPopupRef.current) {
-        hoverPopupRef.current.remove();
-      }
       const popup = new maplibregl.Popup({
         offset: [0, -10],
         className: 'tactical-maplibre-popup',
         closeButton: true,
         maxWidth: '300px',
+      }).setHTML(popupContent);
+
+      const markerLat = cluster.weighted_centroid_lat ?? cluster.centroid_lat;
+      const markerLon = cluster.weighted_centroid_lon ?? cluster.centroid_lon;
+
+      const marker = new maplibregl.Marker({
+        element: markerEl,
       })
-        .setLngLat([lon, lat])
-        .setHTML(getClusterPopupHtml(found))
+        .setLngLat([markerLon, markerLat])
+        .setPopup(popup)
         .addTo(map);
 
-      hoverPopupRef.current = popup;
-    } catch (err) {
-      console.warn('[MapLibre] Flying to selected cluster failed:', err);
-    }
-  }, [selectedClusterId, safeClusters, getClusterPopupHtml]);
+      markerEl.addEventListener('click', () => {
+        onSelectCluster(cluster);
+      });
+
+      markersRef.current.push(marker);
+    });
+  }, [safeClusters, selectedClusterId, onSelectCluster, styleEpoch]);
 
   // 6. Defensive Raw Observations (MODIS vs VIIRS sub-pixels) Layer
   useEffect(() => {
@@ -1783,31 +1315,13 @@ export default function DisasterMap({
   const fitToQueryBounds = useCallback(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
-    map.resize();
-
-    const lonSpan = Math.abs(bbox.max_lon - bbox.min_lon);
-    if (lonSpan >= 300 || (bbox.min_lon <= -170 && bbox.max_lon >= 170)) {
-      map.easeTo({ center: [15, 10], zoom: 1.8, duration: 800 });
-      return;
-    }
-
-    if (bbox.min_lon > bbox.max_lon) {
-      map.fitBounds(
-        [
-          [-175, Math.max(-85, bbox.min_lat)],
-          [175, Math.min(85, bbox.max_lat)],
-        ],
-        { padding: 30, maxZoom: 6, duration: 800 }
-      );
-    } else {
-      map.fitBounds(
-        [
-          [Math.max(-175, bbox.min_lon), Math.max(-85, bbox.min_lat)],
-          [Math.min(175, bbox.max_lon), Math.min(85, bbox.max_lat)],
-        ],
-        { padding: 30, maxZoom: 8, duration: 800 }
-      );
-    }
+    map.fitBounds(
+      [
+        [bbox.min_lon, bbox.min_lat],
+        [bbox.max_lon, bbox.max_lat],
+      ],
+      { padding: 30 }
+    );
   }, [bbox]);
 
   return (
