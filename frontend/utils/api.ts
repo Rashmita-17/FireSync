@@ -214,7 +214,7 @@ export function normalizeBoundingBox(bbox: BoundingBox): BoundingBox {
 }
 
 export const DEFAULT_FETCH_TIMEOUT_MS = 8000;
-export const HARMONIZATION_TIMEOUT_MS = 20000;
+export const HARMONIZATION_TIMEOUT_MS = 45000;
 
 /**
  * Executes a browser fetch with an abort timeout and supports external cancellation signals.

@@ -359,9 +359,10 @@ def harmonize_get(
         if live_obs:
             observations = live_obs
             try:
-                db.bulk_save_objects(live_obs)
+                to_save = live_obs if len(live_obs) <= 1000 else sorted(live_obs, key=lambda x: x.frp or 0.0, reverse=True)[:1000]
+                db.bulk_save_objects(to_save)
                 db.commit()
-                logger.info(f"[Harmonize GET] Persisted {len(live_obs)} live detections to database.")
+                logger.info(f"[Harmonize GET] Persisted {len(to_save)} live detections to database cache.")
             except Exception as e:
                 db.rollback()
                 logger.debug(f"[Harmonize GET] Live observations used directly in-memory: {e}")
@@ -427,9 +428,10 @@ def harmonize_post(
         if live_obs:
             observations = live_obs
             try:
-                db.bulk_save_objects(live_obs)
+                to_save = live_obs if len(live_obs) <= 1000 else sorted(live_obs, key=lambda x: x.frp or 0.0, reverse=True)[:1000]
+                db.bulk_save_objects(to_save)
                 db.commit()
-                logger.info(f"[Harmonize POST] Persisted {len(live_obs)} live detections to database.")
+                logger.info(f"[Harmonize POST] Persisted {len(to_save)} live detections to database cache.")
             except Exception as e:
                 db.rollback()
                 logger.debug(f"[Harmonize POST] Live observations used directly in-memory: {e}")

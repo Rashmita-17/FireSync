@@ -143,3 +143,12 @@ def test_decompose_bbox_antimeridian_and_tiling():
     for t in tiles_large:
         assert (t.max_lon - t.min_lon) <= 20.01
         assert (t.max_lat - t.min_lat) <= 20.01
+
+    # 4. Planetary Overview (World [-180, -60, 180, 75]) must sample representative belts <= 20° x 20°
+    world_bbox = BoundingBox(min_lon=-180.0, min_lat=-60.0, max_lon=180.0, max_lat=75.0)
+    tiles_world, warn_world = firms_client.decompose_bbox(world_bbox)
+    assert len(tiles_world) == 8
+    assert "Planetary Overview" in (warn_world or "")
+    for t in tiles_world:
+        assert (t.max_lon - t.min_lon) <= 20.01
+        assert (t.max_lat - t.min_lat) <= 20.01
