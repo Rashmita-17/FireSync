@@ -21,6 +21,7 @@ from app.schemas.harmonization import (
 from app.services.clustering import SpatioTemporalClusteringEngine
 from app.services.ingestion import ingestion_service
 from app.services.exporter import export_service
+from app.services.firms_client import firms_client
 
 router = APIRouter()
 
@@ -109,6 +110,15 @@ def health_check(db: Session = Depends(get_db)):
             "database_records": 0,
             "is_empty": True,
         }
+
+
+@router.get("/health/firms", summary="Test Live NASA FIRMS Connectivity")
+def health_check_firms():
+    """
+    Makes a live test request to NASA FIRMS API and verifies key validity and network connectivity.
+    Returns {status, http_code, row_count, source, day_range}.
+    """
+    return firms_client.health_check_live()
 
 
 @router.get("/db-status", summary="Production Database Diagnostics and Row Counts")
@@ -292,6 +302,8 @@ def harmonize_get(
     min_lat: float = Query(..., description="Bounding Box South Lat"),
     max_lon: float = Query(..., description="Bounding Box East Lon"),
     max_lat: float = Query(..., description="Bounding Box North Lat"),
+    day_range: int = Query(3, ge=1, le=10, description="FIRMS lookback window in days (1-10)"),
+    use_live: bool = Query(False, description="Force live FIRMS query"),
     start_datetime: Optional[datetime] = Query(None, description="Start date/time UTC"),
     end_datetime: Optional[datetime] = Query(None, description="End date/time UTC"),
     spatial_bandwidth_km: float = Query(settings.DEFAULT_SPATIAL_BANDWIDTH_KM, gt=0.0, le=50.0),
@@ -320,6 +332,8 @@ def harmonize_get(
     )
 
     # Parameter sanitization for direct Python invocations
+    d_range = day_range if isinstance(day_range, (int, float)) else 3
+    is_live = use_live if isinstance(use_live, bool) else False
     s_bandwidth = spatial_bandwidth_km if isinstance(spatial_bandwidth_km, (int, float)) else settings.DEFAULT_SPATIAL_BANDWIDTH_KM
     t_bandwidth = temporal_bandwidth_hours if isinstance(temporal_bandwidth_hours, (int, float)) else settings.DEFAULT_TEMPORAL_BANDWIDTH_HOURS
     c_size = min_cluster_size if isinstance(min_cluster_size, int) else settings.DEFAULT_MIN_CLUSTER_SIZE
@@ -327,6 +341,24 @@ def harmonize_get(
     c_eps = cluster_selection_epsilon if isinstance(cluster_selection_epsilon, (int, float)) else settings.DEFAULT_CLUSTER_EPSILON
     inc_obs = include_observations if isinstance(include_observations, bool) else False
     inc_noise = include_noise if isinstance(include_noise, bool) else False
+
+    # If database is empty for this AOI or live query is requested, fetch directly from NASA FIRMS Area API
+    if (len(observations) == 0 or is_live) and settings.get_map_key():
+        clamped_days = max(1, min(5, int(d_range)))
+        logger.info(f"[Harmonize GET] Database has {len(observations)} records in AOI. Querying live NASA FIRMS API (day_range={clamped_days})...")
+        live_obs = firms_client.fetch_area_observations(bbox=bbox, day_range=clamped_days)
+        if live_obs:
+            observations = live_obs
+            try:
+                db.bulk_save_objects(live_obs)
+                db.commit()
+                logger.info(f"[Harmonize GET] Persisted {len(live_obs)} live detections to database.")
+            except Exception as e:
+                db.rollback()
+                logger.debug(f"[Harmonize GET] Live observations used directly in-memory: {e}")
+            for idx, o in enumerate(observations, 1):
+                if not getattr(o, "id", None):
+                    o.id = idx
 
     engine = SpatioTemporalClusteringEngine(
         spatial_bandwidth_km=s_bandwidth,
@@ -336,12 +368,19 @@ def harmonize_get(
         cluster_selection_epsilon=c_eps,
     )
 
-    return engine.harmonize(
+    result = engine.harmonize(
         observations=observations,
         query_bbox=bbox,
         include_observations=inc_obs,
         include_noise=inc_noise,
     )
+
+    logger.info(
+        f"[Harmonize Result] Bbox=[{bbox.min_lon},{bbox.min_lat},{bbox.max_lon},{bbox.max_lat}] "
+        f"Raw={result.summary.total_observations}, Clusters={result.summary.total_clusters}, "
+        f"CrossValidated={result.summary.cross_validated_clusters}, Time={result.summary.execution_time_ms:.1f}ms"
+    )
+    return result
 
 
 @router.post(
@@ -366,6 +405,24 @@ def harmonize_post(
         min_confidence=payload.min_confidence,
     )
 
+    # If database is empty for this AOI or live query is requested, fetch directly from NASA FIRMS Area API
+    if (len(observations) == 0 or payload.use_live) and settings.get_map_key():
+        clamped_days = max(1, min(5, int(payload.day_range or 3)))
+        logger.info(f"[Harmonize POST] Database has {len(observations)} records in AOI. Querying live NASA FIRMS API (day_range={clamped_days})...")
+        live_obs = firms_client.fetch_area_observations(bbox=payload.bbox, day_range=clamped_days)
+        if live_obs:
+            observations = live_obs
+            try:
+                db.bulk_save_objects(live_obs)
+                db.commit()
+                logger.info(f"[Harmonize POST] Persisted {len(live_obs)} live detections to database.")
+            except Exception as e:
+                db.rollback()
+                logger.debug(f"[Harmonize POST] Live observations used directly in-memory: {e}")
+            for idx, o in enumerate(observations, 1):
+                if not getattr(o, "id", None):
+                    o.id = idx
+
     engine = SpatioTemporalClusteringEngine(
         spatial_bandwidth_km=payload.spatial_bandwidth_km,
         temporal_bandwidth_hours=payload.temporal_bandwidth_hours,
@@ -374,12 +431,19 @@ def harmonize_post(
         cluster_selection_epsilon=payload.cluster_selection_epsilon,
     )
 
-    return engine.harmonize(
+    result = engine.harmonize(
         observations=observations,
         query_bbox=payload.bbox,
         include_observations=payload.include_observations,
         include_noise=payload.include_noise,
     )
+
+    logger.info(
+        f"[Harmonize Result] Bbox=[{payload.bbox.min_lon},{payload.bbox.min_lat},{payload.bbox.max_lon},{payload.bbox.max_lat}] "
+        f"Raw={result.summary.total_observations}, Clusters={result.summary.total_clusters}, "
+        f"CrossValidated={result.summary.cross_validated_clusters}, Time={result.summary.execution_time_ms:.1f}ms"
+    )
+    return result
 
 
 @router.get(
@@ -414,6 +478,16 @@ def export_harmonized_csv_get(
         end_datetime=end_datetime,
         min_confidence=min_confidence,
     )
+
+    if len(observations) == 0 and settings.get_map_key():
+        live_obs = firms_client.fetch_area_observations(bbox=bbox, day_range=3)
+        if live_obs:
+            observations = live_obs
+            try:
+                db.bulk_save_objects(live_obs)
+                db.commit()
+            except Exception:
+                db.rollback()
 
     # Parameter sanitization for direct Python invocations
     s_bandwidth = spatial_bandwidth_km if isinstance(spatial_bandwidth_km, (int, float)) else settings.DEFAULT_SPATIAL_BANDWIDTH_KM
@@ -465,6 +539,16 @@ def export_harmonized_csv_post(
         instruments=payload.instruments,
         min_confidence=payload.min_confidence,
     )
+
+    if len(observations) == 0 and settings.get_map_key():
+        live_obs = firms_client.fetch_area_observations(bbox=payload.bbox, day_range=payload.day_range or 3)
+        if live_obs:
+            observations = live_obs
+            try:
+                db.bulk_save_objects(live_obs)
+                db.commit()
+            except Exception:
+                db.rollback()
 
     engine = SpatioTemporalClusteringEngine(
         spatial_bandwidth_km=payload.spatial_bandwidth_km,

@@ -250,19 +250,16 @@ class SpatioTemporalClusteringEngine:
 
         # 4. Synthesize clusters and resolve sensor differences
         clusters: List[HarmonizedCluster] = []
-        unique_labels = sorted(set(labels))
-        
         modis_total_detections = int((df["instrument"] == "MODIS").sum())
         viirs_total_detections = int((df["instrument"] == "VIIRS").sum())
         cross_val_clusters_count = 0
         total_harmonized_frp = 0.0
 
-        for label in unique_labels:
-            if label == -1:
-                # Noise points (isolated anomalies)
-                continue
-                
-            cluster_df = df[df["cluster_label"] == label]
+        # Efficient single groupby over valid clusters instead of O(N*C) boolean masking
+        valid_clusters_df = df[df["cluster_label"] != -1]
+        grouped = valid_clusters_df.groupby("cluster_label", sort=True)
+
+        for label, cluster_df in grouped:
             n_det = len(cluster_df)
             
             # Sensor composition
@@ -327,12 +324,12 @@ class SpatioTemporalClusteringEngine:
                 pixel_nominal_area_km2=pixel_nominal_area
             )
 
-            # Member observations if requested
+            # Member observations if requested (direct model validation without to_dict overhead)
             member_obs = None
             if include_observations:
                 member_obs = [
-                    ObservationResponse.model_validate(item["obj"])
-                    for item in cluster_df.to_dict(orient="records")
+                    ObservationResponse.model_validate(obj)
+                    for obj in cluster_df["obj"].tolist()
                 ]
 
             cluster_item = HarmonizedCluster(

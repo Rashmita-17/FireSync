@@ -24,8 +24,8 @@ class ObservationCreate(ObservationBase):
 
 
 class ObservationResponse(ObservationBase):
-    id: int
-    created_at: datetime
+    id: Optional[int] = Field(None, description="Observation identifier")
+    created_at: Optional[datetime] = Field(None, description="Record creation timestamp")
 
     model_config = ConfigDict(from_attributes=True)
 

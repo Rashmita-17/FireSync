@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Header from '@/components/Header';
 import ControlPanel from '@/components/ControlPanel';
 import MapWrapper from '@/components/MapWrapper';
@@ -24,6 +24,8 @@ export default function DisasterResponseDashboard() {
 
   // Primary Bounding Box state (Default: Sierra Nevada / Central California)
   const [bbox, setBbox] = useState<BoundingBox>(PRESET_REGIONS[0].bbox);
+  // FIRMS Query Lookback Window (1-10 days, default 3)
+  const [dayRange, setDayRange] = useState<number>(3);
 
   // Harmonization data states
   const [clusters, setClusters] = useState<HarmonizedCluster[]>([]);
@@ -45,9 +47,19 @@ export default function DisasterResponseDashboard() {
   const [totalDbRecords, setTotalDbRecords] = useState(0);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
 
+  // Tracks active in-flight harmonization to cancel superseded requests
+  const activeHarmonizeAbortRef = useRef<AbortController | null>(null);
+
   // Harmonize function
   const executeHarmonization = useCallback(
     async (overrideParams?: Partial<HarmonizeParams>) => {
+      // Abort any previous pending harmonization query
+      if (activeHarmonizeAbortRef.current) {
+        activeHarmonizeAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      activeHarmonizeAbortRef.current = controller;
+
       setLoading(true);
       setErrorNotice(null);
 
@@ -56,6 +68,7 @@ export default function DisasterResponseDashboard() {
       try {
         const queryParams: HarmonizeParams = {
           bbox: targetBbox,
+          day_range: overrideParams?.day_range ?? dayRange,
           spatial_bandwidth_km: overrideParams?.spatial_bandwidth_km ?? 2.5,
           temporal_bandwidth_hours: overrideParams?.temporal_bandwidth_hours ?? 6.0,
           min_cluster_size: overrideParams?.min_cluster_size ?? 2,
@@ -64,22 +77,63 @@ export default function DisasterResponseDashboard() {
           min_confidence: overrideParams?.min_confidence ?? 0.0,
           include_observations: true,
           include_noise: true,
+          signal: controller.signal,
         };
 
         const result = await fetchHarmonizedData(queryParams);
-        setClusters([...(result.clusters || [])]);
-        setSummary(result.summary ? { ...result.summary } : null);
-        setNoisePoints([...(result.noise_points || [])]);
+        if (controller.signal.aborted) return;
+
+        const safeClusters = Array.isArray(result?.clusters) ? result.clusters : [];
+        setClusters([...safeClusters]);
+        setSummary(
+          result?.summary
+            ? { ...result.summary }
+            : {
+                total_observations: 0,
+                total_clusters: safeClusters.length,
+                total_noise_points: 0,
+                modis_detections: 0,
+                viirs_detections: 0,
+                cross_validated_clusters: 0,
+                cross_validation_rate: 0,
+                total_harmonized_frp_mw: 0,
+                spatial_compression_ratio: 1.0,
+                execution_time_ms: 0,
+              }
+        );
+        setNoisePoints(Array.isArray(result?.noise_points) ? [...result.noise_points] : []);
       } catch (err: any) {
+        // If superseded by a newer query or manually aborted, silently ignore
+        if (controller.signal.aborted || err?.message?.includes('aborted')) {
+          return;
+        }
+
         console.error('[Dashboard Error] Failed to harmonize AOI bounding box:', {
           error: err,
           message: err.message,
           stack: err.stack,
           bbox,
         });
+        // Gracefully render 0 active complexes without crashing or hanging
+        setClusters([]);
+        setSummary({
+          total_observations: 0,
+          total_clusters: 0,
+          total_noise_points: 0,
+          modis_detections: 0,
+          viirs_detections: 0,
+          cross_validated_clusters: 0,
+          cross_validation_rate: 0,
+          total_harmonized_frp_mw: 0,
+          spatial_compression_ratio: 1.0,
+          execution_time_ms: 0,
+        });
+        setNoisePoints([]);
         setErrorNotice(err.message || 'Failed to connect to FastAPI /api/harmonize endpoint');
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
       }
     },
     [bbox]
@@ -103,17 +157,25 @@ export default function DisasterResponseDashboard() {
     setBbox(normalizeBoundingBox(newBbox));
   };
 
-  // Re-run harmonization whenever bbox changes
+  // Re-run harmonization whenever bbox or dayRange changes
   useEffect(() => {
     executeHarmonization();
-  }, [bbox]);
+  }, [bbox, dayRange]);
 
   // Check backend health on mount and every 30 seconds
   useEffect(() => {
     const checkHealth = async () => {
       const health = await fetchHealthStatus();
-      setBackendHealthy(health.status === 'healthy');
-      setTotalDbRecords(health.records);
+      // Permissive: Any HTTP 200 / ok sets backend status to ONLINE
+      setBackendHealthy(
+        Boolean(
+          health.ok ||
+          health.status === 'online' ||
+          health.status === 'healthy' ||
+          health.status === 'empty_database'
+        )
+      );
+      setTotalDbRecords(health.records || 0);
     };
 
     checkHealth();
@@ -139,6 +201,8 @@ export default function DisasterResponseDashboard() {
             bbox={bbox}
             onBboxChange={handleBoundsChange}
             onHarmonize={executeHarmonization}
+            dayRange={dayRange}
+            onDayRangeChange={setDayRange}
             onExportCsv={handleExportCsv}
             loading={loading}
             exporting={exporting}
@@ -153,11 +217,12 @@ export default function DisasterResponseDashboard() {
           {/* Center: Dynamic Geospatial Map */}
           <div className="flex-1 relative h-full">
             {errorNotice && (
-              <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[1500] px-4 py-2 bg-rose-950/90 border border-rose-500 text-rose-200 text-xs rounded-lg backdrop-blur-md shadow-2xl flex items-center gap-3">
-                <span>⚠️ {errorNotice}</span>
+              <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[1500] max-w-xl px-4 py-2.5 bg-rose-950/95 border border-rose-500/80 text-rose-200 text-xs rounded-xl backdrop-blur-md shadow-2xl flex items-center gap-3 animate-fade-in">
+                <span className="font-semibold text-rose-300">⚠️ Backend Error:</span>
+                <span className="flex-1 font-mono text-[11px] break-words">{errorNotice}</span>
                 <button
                   onClick={() => setErrorNotice(null)}
-                  className="text-xs text-rose-400 hover:text-white underline font-semibold"
+                  className="px-2 py-0.5 rounded bg-rose-900/60 hover:bg-rose-800 text-xs text-rose-200 font-semibold border border-rose-700/60"
                 >
                   Dismiss
                 </button>
@@ -186,6 +251,8 @@ export default function DisasterResponseDashboard() {
             selectedClusterId={selectedCluster?.cluster_id ?? null}
             onSelectCluster={(cluster) => setSelectedCluster(cluster)}
             loading={loading}
+            errorNotice={errorNotice}
+            onRetry={() => executeHarmonization()}
           />
         </main>
       ) : (
