@@ -203,4 +203,5 @@ class HarmonizationResponse(BaseModel):
     clusters: List[HarmonizedCluster]
     noise_points: Optional[List[ObservationResponse]] = None
     warning: Optional[str] = Field(None, description="Diagnostic warning if box was tiled, clamped, or truncated")
+    notice: Optional[str] = Field(None, description="User-facing notice for UI banners (e.g. lookback capped)")
 

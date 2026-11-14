@@ -104,7 +104,7 @@ export default function DisasterResponseDashboard() {
               }
         );
         setNoisePoints(Array.isArray(result?.noise_points) ? [...result.noise_points] : []);
-        setWarningNotice(result?.warning || null);
+        setWarningNotice(result?.notice || result?.warning || null);
       } catch (err: any) {
         // If superseded by a newer query or manually aborted, silently ignore
         if (controller.signal.aborted || err?.message?.includes('aborted')) {

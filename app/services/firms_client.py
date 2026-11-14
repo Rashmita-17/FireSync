@@ -482,7 +482,11 @@ class FirmsClient:
                 tasks.append((source, tile))
 
         limits = httpx.Limits(max_keepalive_connections=15, max_connections=25)
-        timeout_cfg = httpx.Timeout(connect=10.0, read=25.0, write=10.0, pool=10.0)
+        timeout_cfg = (
+            httpx.Timeout(connect=8.0, read=15.0, write=8.0, pool=8.0)
+            if is_planetary
+            else httpx.Timeout(connect=10.0, read=25.0, write=10.0, pool=10.0)
+        )
 
         with httpx.Client(timeout=timeout_cfg, limits=limits) as client:
             def _fetch_single_task(source: str, tile: BoundingBox) -> List[Observation]:
@@ -517,7 +521,7 @@ class FirmsClient:
                 return obs_list
 
             all_observations: List[Observation] = []
-            max_workers = min(10, max(1, len(tasks)))
+            max_workers = min(6, max(1, len(tasks))) if is_planetary else min(10, max(1, len(tasks)))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_task = {
                     executor.submit(_fetch_single_task, s, t): (s, t)

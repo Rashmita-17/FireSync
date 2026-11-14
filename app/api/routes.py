@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime
 from typing import Optional, List
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, and_
@@ -22,6 +23,7 @@ from app.services.clustering import SpatioTemporalClusteringEngine
 from app.services.ingestion import ingestion_service
 from app.services.exporter import export_service
 from app.services.firms_client import firms_client
+from app.services.large_area import is_large_area, thin_observations, large_area_cache
 
 router = APIRouter()
 
@@ -328,8 +330,20 @@ def harmonize_get(
     """
     bbox = BoundingBox(min_lon=min_lon, min_lat=min_lat, max_lon=max_lon, max_lat=max_lat)
     
+    # Large-area threshold & lookback capping (only affects large-area requests)
+    is_large = is_large_area(bbox)
+    raw_days = day_range if isinstance(day_range, (int, float)) else 3
+    clamped_days = 1 if (is_large and raw_days > 1) else max(1, min(5, int(raw_days)))
+    notice_text = "Global view limited to 1 day for performance" if (is_large and raw_days > 1) else None
+
+    # Check large-area in-memory TTL cache for instant repeat clicks
+    if is_large:
+        cached = large_area_cache.get(bbox=bbox, day_range=clamped_days, instruments=None)
+        if cached:
+            logger.info("[Harmonize GET] Returning cached response for large-area AOI")
+            return cached
+
     # Parameter sanitization for direct Python invocations
-    d_range = day_range if isinstance(day_range, (int, float)) else 3
     is_live = use_live if isinstance(use_live, bool) else False
     s_bandwidth = spatial_bandwidth_km if isinstance(spatial_bandwidth_km, (int, float)) else settings.DEFAULT_SPATIAL_BANDWIDTH_KM
     t_bandwidth = temporal_bandwidth_hours if isinstance(temporal_bandwidth_hours, (int, float)) else settings.DEFAULT_TEMPORAL_BANDWIDTH_HOURS
@@ -353,7 +367,6 @@ def harmonize_get(
     # If database is empty for this AOI or live query is requested, fetch directly from NASA FIRMS Area API
     warning_message: Optional[str] = None
     if (len(observations) == 0 or is_live) and settings.get_map_key():
-        clamped_days = max(1, min(5, int(d_range)))
         logger.info(f"[Harmonize GET] Database has {len(observations)} records in AOI. Querying live NASA FIRMS API (day_range={clamped_days})...")
         live_obs, warning_message = firms_client.fetch_area_observations(bbox=bbox, day_range=clamped_days)
         if live_obs:
@@ -370,6 +383,12 @@ def harmonize_get(
                 if not getattr(o, "id", None):
                     o.id = idx
 
+    # Spatial grid-thinning for large-area requests only
+    if is_large and len(observations) > 0:
+        logger.info(f"[Harmonize GET] Applying spatial grid-thinning to {len(observations)} observations for large area...")
+        observations = thin_observations(observations, cell_size_deg=0.35, min_confidence=30.0)
+        logger.info(f"[Harmonize GET] Reduced to {len(observations)} thinned observations.")
+
     engine = SpatioTemporalClusteringEngine(
         spatial_bandwidth_km=s_bandwidth,
         temporal_bandwidth_hours=t_bandwidth,
@@ -378,13 +397,21 @@ def harmonize_get(
         cluster_selection_epsilon=c_eps,
     )
 
-    result = engine.harmonize(
-        observations=observations,
-        query_bbox=bbox,
-        include_observations=inc_obs,
-        include_noise=inc_noise,
-        warning=warning_message,
-    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(
+            engine.harmonize,
+            observations=observations,
+            query_bbox=bbox,
+            include_observations=inc_obs,
+            include_noise=inc_noise,
+            warning=warning_message,
+        ).result()
+
+    if notice_text:
+        result.notice = notice_text
+
+    if is_large:
+        large_area_cache.set(bbox=bbox, day_range=clamped_days, response=result, instruments=None)
 
     logger.info(
         f"[Harmonize Result] Bbox=[{bbox.min_lon},{bbox.min_lat},{bbox.max_lon},{bbox.max_lat}] "
@@ -407,6 +434,19 @@ def harmonize_post(
     Spatio-Temporal Harmonization endpoint accepting a structured JSON payload with
     bounding box, temporal filters, and HDBSCAN hyperparameters.
     """
+    # Large-area threshold & lookback capping (only affects large-area requests)
+    is_large = is_large_area(payload.bbox)
+    raw_days = payload.day_range if isinstance(payload.day_range, (int, float)) else 3
+    clamped_days = 1 if (is_large and raw_days > 1) else max(1, min(5, int(raw_days)))
+    notice_text = "Global view limited to 1 day for performance" if (is_large and raw_days > 1) else None
+
+    # Check large-area in-memory TTL cache for instant repeat clicks
+    if is_large:
+        cached = large_area_cache.get(bbox=payload.bbox, day_range=clamped_days, instruments=payload.instruments)
+        if cached:
+            logger.info("[Harmonize POST] Returning cached response for large-area AOI")
+            return cached
+
     if payload.use_live:
         observations = []
     else:
@@ -422,7 +462,6 @@ def harmonize_post(
     # If database is empty for this AOI or live query is requested, fetch directly from NASA FIRMS Area API
     warning_message: Optional[str] = None
     if (len(observations) == 0 or payload.use_live) and settings.get_map_key():
-        clamped_days = max(1, min(5, int(payload.day_range or 3)))
         logger.info(f"[Harmonize POST] Database has {len(observations)} records in AOI. Querying live NASA FIRMS API (day_range={clamped_days})...")
         live_obs, warning_message = firms_client.fetch_area_observations(bbox=payload.bbox, day_range=clamped_days)
         if live_obs:
@@ -439,6 +478,12 @@ def harmonize_post(
                 if not getattr(o, "id", None):
                     o.id = idx
 
+    # Spatial grid-thinning for large-area requests only
+    if is_large and len(observations) > 0:
+        logger.info(f"[Harmonize POST] Applying spatial grid-thinning to {len(observations)} observations for large area...")
+        observations = thin_observations(observations, cell_size_deg=0.35, min_confidence=30.0)
+        logger.info(f"[Harmonize POST] Reduced to {len(observations)} thinned observations.")
+
     engine = SpatioTemporalClusteringEngine(
         spatial_bandwidth_km=payload.spatial_bandwidth_km,
         temporal_bandwidth_hours=payload.temporal_bandwidth_hours,
@@ -447,13 +492,28 @@ def harmonize_post(
         cluster_selection_epsilon=payload.cluster_selection_epsilon,
     )
 
-    result = engine.harmonize(
-        observations=observations,
-        query_bbox=payload.bbox,
-        include_observations=payload.include_observations,
-        include_noise=payload.include_noise,
-        warning=warning_message,
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(
+            engine.harmonize,
+            observations=observations,
+            query_bbox=payload.bbox,
+            include_observations=payload.include_observations,
+            include_noise=payload.include_noise,
+            warning=warning_message,
+        ).result()
+
+    if notice_text:
+        result.notice = notice_text
+
+    if is_large:
+        large_area_cache.set(bbox=payload.bbox, day_range=clamped_days, response=result, instruments=payload.instruments)
+
+    logger.info(
+        f"[Harmonize Result] Bbox=[{payload.bbox.min_lon},{payload.bbox.min_lat},{payload.bbox.max_lon},{payload.bbox.max_lat}] "
+        f"Raw={result.summary.total_observations}, Clusters={result.summary.total_clusters}, "
+        f"CrossValidated={result.summary.cross_validated_clusters}, Time={result.summary.execution_time_ms:.1f}ms"
     )
+    return result
 
     logger.info(
         f"[Harmonize Result] Bbox=[{payload.bbox.min_lon},{payload.bbox.min_lat},{payload.bbox.max_lon},{payload.bbox.max_lat}] "

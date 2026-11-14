@@ -70,6 +70,7 @@ export interface HarmonizationResponse {
   clusters: HarmonizedCluster[];
   noise_points?: RawObservation[];
   warning?: string;
+  notice?: string;
 }
 
 export interface BackendStats {

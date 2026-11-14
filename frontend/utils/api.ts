@@ -215,6 +215,18 @@ export function normalizeBoundingBox(bbox: BoundingBox): BoundingBox {
 
 export const DEFAULT_FETCH_TIMEOUT_MS = 8000;
 export const HARMONIZATION_TIMEOUT_MS = 45000;
+export const LARGE_AREA_TIMEOUT_MS = 120000;
+
+/**
+ * Checks if a bounding box exceeds the large-area threshold (>= 40° span or 1600 sq deg).
+ */
+export function isLargeAreaBbox(bbox: BoundingBox, thresholdDeg: number = 40.0): boolean {
+  const lonSpan = bbox.min_lon > bbox.max_lon
+    ? 360.0 - (bbox.min_lon - bbox.max_lon)
+    : Math.abs(bbox.max_lon - bbox.min_lon);
+  const latSpan = Math.abs(bbox.max_lat - bbox.min_lat);
+  return lonSpan > thresholdDeg || latSpan > thresholdDeg || (lonSpan * latSpan) > (thresholdDeg * thresholdDeg);
+}
 
 /**
  * Executes a browser fetch with an abort timeout and supports external cancellation signals.
@@ -298,9 +310,12 @@ export async function fetchHarmonizedData(params: HarmonizeParams): Promise<Harm
     noise_points: [],
   };
 
+  const isLarge = isLargeAreaBbox(normalizedBbox);
+  const timeoutMs = isLarge ? LARGE_AREA_TIMEOUT_MS : HARMONIZATION_TIMEOUT_MS;
+
   const executePost = async (baseUrl: string) => {
     const fullUrl = `${baseUrl}/api/harmonize`;
-    console.log(`[FireSync API Fetch] Calling: ${fullUrl}`);
+    console.log(`[FireSync API Fetch] Calling: ${fullUrl} (timeout: ${timeoutMs / 1000}s, isLargeArea: ${isLarge})`);
     return fetchWithTimeout(
       fullUrl,
       {
@@ -309,7 +324,7 @@ export async function fetchHarmonizedData(params: HarmonizeParams): Promise<Harm
         body: JSON.stringify(payload),
         signal: params.signal,
       },
-      HARMONIZATION_TIMEOUT_MS
+      timeoutMs
     );
   };
 
