@@ -344,7 +344,7 @@ def harmonize_get(
 
     # If database is empty for this AOI or live query is requested, fetch directly from NASA FIRMS Area API
     if (len(observations) == 0 or is_live) and settings.get_map_key():
-        clamped_days = max(1, min(10, int(d_range)))
+        clamped_days = max(1, min(5, int(d_range)))
         logger.info(f"[Harmonize GET] Database has {len(observations)} records in AOI. Querying live NASA FIRMS API (day_range={clamped_days})...")
         live_obs = firms_client.fetch_area_observations(bbox=bbox, day_range=clamped_days)
         if live_obs:
@@ -355,7 +355,10 @@ def harmonize_get(
                 logger.info(f"[Harmonize GET] Persisted {len(live_obs)} live detections to database.")
             except Exception as e:
                 db.rollback()
-                logger.warning(f"[Harmonize GET] Could not persist live records: {e}")
+                logger.debug(f"[Harmonize GET] Live observations used directly in-memory: {e}")
+            for idx, o in enumerate(observations, 1):
+                if not getattr(o, "id", None):
+                    o.id = idx
 
     engine = SpatioTemporalClusteringEngine(
         spatial_bandwidth_km=s_bandwidth,
@@ -404,7 +407,7 @@ def harmonize_post(
 
     # If database is empty for this AOI or live query is requested, fetch directly from NASA FIRMS Area API
     if (len(observations) == 0 or payload.use_live) and settings.get_map_key():
-        clamped_days = max(1, min(10, int(payload.day_range or 3)))
+        clamped_days = max(1, min(5, int(payload.day_range or 3)))
         logger.info(f"[Harmonize POST] Database has {len(observations)} records in AOI. Querying live NASA FIRMS API (day_range={clamped_days})...")
         live_obs = firms_client.fetch_area_observations(bbox=payload.bbox, day_range=clamped_days)
         if live_obs:
@@ -415,7 +418,10 @@ def harmonize_post(
                 logger.info(f"[Harmonize POST] Persisted {len(live_obs)} live detections to database.")
             except Exception as e:
                 db.rollback()
-                logger.warning(f"[Harmonize POST] Could not persist live records: {e}")
+                logger.debug(f"[Harmonize POST] Live observations used directly in-memory: {e}")
+            for idx, o in enumerate(observations, 1):
+                if not getattr(o, "id", None):
+                    o.id = idx
 
     engine = SpatioTemporalClusteringEngine(
         spatial_bandwidth_km=payload.spatial_bandwidth_km,

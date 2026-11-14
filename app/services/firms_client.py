@@ -101,7 +101,7 @@ class FirmsClient:
         s = round(bbox.min_lat, 4)
         e = round(bbox.max_lon, 4)
         n = round(bbox.max_lat, 4)
-        clamped_days = max(1, min(10, int(day_range)))
+        clamped_days = max(1, min(5, int(day_range)))
         return f"{self.BASE_URL}/{map_key}/{source}/{w},{s},{e},{n}/{clamped_days}"
 
     def parse_firms_csv_to_observations(
@@ -287,7 +287,7 @@ class FirmsClient:
         """
         map_key = self._require_map_key()
         active_sources = sources or DEFAULT_FIRMS_SOURCES
-        clamped_day_range = max(1, min(10, int(day_range)))
+        clamped_day_range = max(1, min(5, int(day_range)))
 
         all_observations: List[Observation] = []
         sensor_counts: Dict[str, int] = {}
