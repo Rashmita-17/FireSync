@@ -1,4 +1,12 @@
-import { BoundingBox, HarmonizationResponse, BackendStats, PresetRegion } from '@/types/fire';
+import {
+  BoundingBox,
+  HarmonizationResponse,
+  HarmonizedCluster,
+  HarmonizationSummary,
+  RawObservation,
+  BackendStats,
+  PresetRegion,
+} from '@/types/fire';
 
 /**
  * Resolves the backend API base URL strictly using process.env.NEXT_PUBLIC_API_URL.
@@ -111,8 +119,42 @@ export function normalizeBoundingBox(bbox: BoundingBox): BoundingBox {
   };
 }
 
+export const DEFAULT_FETCH_TIMEOUT_MS = 8000;
+
 /**
- * Calls FastAPI POST /api/harmonize endpoint with bounding box and HDBSCAN parameters
+ * Executes a browser fetch with a strict abort timeout.
+ * Prevents hanging connections on spin-up delays or sleeping cloud instances.
+ */
+export async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs: number = DEFAULT_FETCH_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } catch (err: any) {
+    if (err?.name === 'AbortError' || controller.signal.aborted) {
+      throw new Error(`Request timed out after ${timeoutMs / 1000}s (backend unreachable or cold start)`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Calls FastAPI POST /api/harmonize endpoint with bounding box and HDBSCAN parameters.
+ * Includes defensive parsing so empty databases, empty lists, or null payloads
+ * gracefully return 0 active complexes instead of crashing or hanging the map.
  */
 export async function fetchHarmonizedData(params: HarmonizeParams): Promise<HarmonizationResponse> {
   const normalizedBbox = normalizeBoundingBox(params.bbox);
@@ -128,14 +170,37 @@ export async function fetchHarmonizedData(params: HarmonizeParams): Promise<Harm
     include_noise: params.include_noise ?? true,
   };
 
+  const defaultEmptyResponse: HarmonizationResponse = {
+    status: 'empty',
+    query_bbox: normalizedBbox,
+    summary: {
+      total_observations: 0,
+      total_clusters: 0,
+      total_noise_points: 0,
+      modis_detections: 0,
+      viirs_detections: 0,
+      cross_validated_clusters: 0,
+      cross_validation_rate: 0,
+      total_harmonized_frp_mw: 0,
+      spatial_compression_ratio: 1.0,
+      execution_time_ms: 0,
+    },
+    clusters: [],
+    noise_points: [],
+  };
+
   const executePost = async (baseUrl: string) => {
     const fullUrl = `${baseUrl}/api/harmonize`;
     console.log(`[FireSync API Fetch] Calling: ${fullUrl}`);
-    return fetch(fullUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+    return fetchWithTimeout(
+      fullUrl,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+      DEFAULT_FETCH_TIMEOUT_MS
+    );
   };
 
   let response: Response;
@@ -150,31 +215,104 @@ export async function fetchHarmonizedData(params: HarmonizeParams): Promise<Harm
         response = await executePost(ALTERNATE_API_BASE_URL);
         activeUrl = ALTERNATE_API_BASE_URL;
       } catch (retryErr: any) {
-        console.error(`[Harmonization Network Error] Failed to reach backend at ${API_BASE_URL}:`, retryErr);
-        throw new Error(`Failed to reach FastAPI backend at ${API_BASE_URL}. Ensure server is running: ${retryErr.message}`);
+        console.error(`[Harmonization Network Error] Failed to reach backend:`, retryErr);
+        throw new Error(`Failed to reach FastAPI backend: ${retryErr.message}`);
       }
     } else {
-      console.error(`[Harmonization Network Error] Failed to reach remote backend at ${API_BASE_URL}:`, err);
-      throw new Error(`Failed to reach production FastAPI backend at ${API_BASE_URL}: ${err.message}`);
+      console.error(`[Harmonization Network Error] Failed to reach production backend at ${API_BASE_URL}:`, err);
+      throw new Error(`Failed to reach production FastAPI backend: ${err.message}`);
     }
   }
 
   if (!response.ok) {
-    const errorText = await response.text();
+    const errorText = await response.text().catch(() => '');
     console.error(`[Harmonization API Error HTTP ${response.status}] Server response from ${activeUrl}:`, errorText);
     if (errorText.includes('<!DOCTYPE') || errorText.includes('<html')) {
       throw new Error(
         `FastAPI backend returned HTML error at ${activeUrl} (Status ${response.status}). Check backend logs.`
       );
     }
-    throw new Error(`Harmonization failed (${response.status}): ${errorText}`);
+    throw new Error(`Harmonization failed (${response.status}): ${errorText || response.statusText}`);
   }
 
-  return response.json();
+  // Safe Harmonize Parsing: gracefully handle [], null, {}, or missing clusters
+  let rawData: any = null;
+  try {
+    rawData = await response.json();
+  } catch {
+    return defaultEmptyResponse;
+  }
+
+  if (!rawData) {
+    return defaultEmptyResponse;
+  }
+
+  let parsedClusters: HarmonizedCluster[] = [];
+  if (Array.isArray(rawData)) {
+    parsedClusters = rawData.filter(Boolean);
+  } else if (Array.isArray(rawData.clusters)) {
+    parsedClusters = rawData.clusters.filter(Boolean);
+  }
+
+  const parsedNoise: RawObservation[] = Array.isArray(rawData?.noise_points)
+    ? rawData.noise_points.filter(Boolean)
+    : [];
+
+  const rawSummary = rawData?.summary;
+  const safeSummary: HarmonizationSummary = {
+    total_observations: Number(
+      rawSummary?.total_observations ??
+      parsedClusters.reduce((acc, c) => acc + (Number(c?.total_detections) || 0), 0)
+    ),
+    total_clusters: Number(rawSummary?.total_clusters ?? parsedClusters.length),
+    total_noise_points: Number(rawSummary?.total_noise_points ?? parsedNoise.length),
+    modis_detections: Number(
+      rawSummary?.modis_detections ??
+      parsedClusters.reduce((acc, c) => acc + (Number(c?.modis_count) || 0), 0)
+    ),
+    viirs_detections: Number(
+      rawSummary?.viirs_detections ??
+      parsedClusters.reduce((acc, c) => acc + (Number(c?.viirs_count) || 0), 0)
+    ),
+    cross_validated_clusters: Number(
+      rawSummary?.cross_validated_clusters ??
+      parsedClusters.filter((c) => Boolean(c?.cross_validated)).length
+    ),
+    cross_validation_rate: Number(
+      rawSummary?.cross_validation_rate ??
+      (parsedClusters.length > 0
+        ? parsedClusters.filter((c) => Boolean(c?.cross_validated)).length / parsedClusters.length
+        : 0)
+    ),
+    total_harmonized_frp_mw: Number(
+      rawSummary?.total_harmonized_frp_mw ??
+      parsedClusters.reduce((acc, c) => acc + (Number(c?.total_frp) || 0), 0)
+    ),
+    spatial_compression_ratio: Number(
+      rawSummary?.spatial_compression_ratio ??
+      (parsedClusters.length > 0 && safeSummaryFallbackObs(rawSummary, parsedClusters) > 0
+        ? safeSummaryFallbackObs(rawSummary, parsedClusters) / parsedClusters.length
+        : 1.0)
+    ),
+    execution_time_ms: Number(rawSummary?.execution_time_ms ?? 0),
+  };
+
+  return {
+    status: rawData?.status || 'success',
+    query_bbox: rawData?.query_bbox || normalizedBbox,
+    summary: safeSummary,
+    clusters: parsedClusters,
+    noise_points: parsedNoise,
+  };
+}
+
+function safeSummaryFallbackObs(rawSummary: any, clusters: HarmonizedCluster[]): number {
+  if (rawSummary?.total_observations !== undefined) return Number(rawSummary.total_observations);
+  return clusters.reduce((acc, c) => acc + (Number(c?.total_detections) || 0), 0);
 }
 
 /**
- * Triggers scientific CSV export download from FastAPI /api/export
+ * Triggers scientific CSV export download from FastAPI /api/export with strict timeout
  */
 export async function downloadHarmonizedCsv(params: HarmonizeParams): Promise<void> {
   const normalizedBbox = normalizeBoundingBox(params.bbox);
@@ -189,11 +327,15 @@ export async function downloadHarmonizedCsv(params: HarmonizeParams): Promise<vo
 
   const exportUrl = `${API_BASE_URL}/api/export`;
   console.log(`[FireSync API Fetch] Calling export: ${exportUrl}`);
-  const response = await fetch(exportUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  const response = await fetchWithTimeout(
+    exportUrl,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+    DEFAULT_FETCH_TIMEOUT_MS
+  );
 
   if (!response.ok) {
     throw new Error(`Export failed with status: ${response.status}`);
@@ -211,43 +353,60 @@ export async function downloadHarmonizedCsv(params: HarmonizeParams): Promise<vo
   document.body.removeChild(a);
 }
 
+export interface HealthStatusResult {
+  status: 'online' | 'offline' | 'healthy' | 'empty_database' | string;
+  ok: boolean;
+  records: number;
+  engine: string;
+  is_empty?: boolean;
+}
+
 /**
- * Checks FastAPI backend health and database readiness
+ * Checks FastAPI backend health and database readiness.
+ * PERMISSIVE: Any HTTP 200 (or 2xx) response automatically flags backend as ONLINE.
  */
-export async function fetchHealthStatus(): Promise<{ status: string; records: number; engine: string; is_empty?: boolean }> {
-  const checkEndpoint = async (baseUrl: string) => {
+export async function fetchHealthStatus(): Promise<HealthStatusResult> {
+  const checkEndpoint = async (baseUrl: string): Promise<HealthStatusResult> => {
     const healthUrl = `${baseUrl}/api/health`;
     console.log(`[FireSync API Fetch] Checking health: ${healthUrl}`);
-    const res = await fetch(healthUrl, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
+    const res = await fetchWithTimeout(
+      healthUrl,
+      { cache: 'no-store' },
+      DEFAULT_FETCH_TIMEOUT_MS
+    );
+
+    // Permissive: Any 2xx response automatically establishes ONLINE state
+    if (res.ok) {
+      let data: any = {};
+      try {
+        data = await res.json();
+      } catch {
+        // Plain text 200 or non-JSON 200 is still ONLINE
+      }
+      return {
+        status: 'online',
+        ok: true,
+        records: Number(data?.database_records ?? data?.records ?? data?.count ?? 0),
+        engine: String(data?.clustering_engine ?? data?.engine ?? 'HDBSCAN'),
+        is_empty: Boolean(data?.is_empty ?? (data?.database_records === 0)),
+      };
+    }
+    throw new Error(`HTTP ${res.status}`);
   };
 
   try {
-    const data = await checkEndpoint(API_BASE_URL);
-    return {
-      status: data.status,
-      records: data.database_records,
-      engine: data.clustering_engine,
-      is_empty: data.is_empty,
-    };
+    return await checkEndpoint(API_BASE_URL);
   } catch (err: any) {
     if (isLocalhost) {
       try {
-        const data = await checkEndpoint(ALTERNATE_API_BASE_URL);
-        return {
-          status: data.status,
-          records: data.database_records,
-          engine: data.clustering_engine,
-          is_empty: data.is_empty,
-        };
+        return await checkEndpoint(ALTERNATE_API_BASE_URL);
       } catch (altErr: any) {
-        console.error(`[FastAPI Health Check Offline] Could not reach ${API_BASE_URL}/api/health:`, altErr);
-        return { status: 'offline', records: 0, engine: 'unavailable', is_empty: true };
+        console.warn(`[FastAPI Health Check Offline] Could not reach ${API_BASE_URL}/api/health:`, altErr.message);
+        return { status: 'offline', ok: false, records: 0, engine: 'unavailable', is_empty: true };
       }
     } else {
-      console.error(`[FastAPI Health Check Offline] Could not reach remote ${API_BASE_URL}/api/health:`, err);
-      return { status: 'offline', records: 0, engine: 'unavailable', is_empty: true };
+      console.warn(`[FastAPI Health Check Offline] Could not reach remote ${API_BASE_URL}/api/health:`, err.message);
+      return { status: 'offline', ok: false, records: 0, engine: 'unavailable', is_empty: true };
     }
   }
 }
@@ -259,11 +418,15 @@ export async function fetchDbStatus(): Promise<any> {
   const dbStatusUrl = `${API_BASE_URL}/api/db-status`;
   console.log(`[FireSync API Fetch] Checking DB status: ${dbStatusUrl}`);
   try {
-    const res = await fetch(dbStatusUrl, { cache: 'no-store' });
+    const res = await fetchWithTimeout(
+      dbStatusUrl,
+      { cache: 'no-store' },
+      DEFAULT_FETCH_TIMEOUT_MS
+    );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   } catch (err: any) {
-    console.error(`[FastAPI DB Status Check Failed] Could not reach ${dbStatusUrl}:`, err);
+    console.error(`[FastAPI DB Status Check Failed] Could not reach ${dbStatusUrl}:`, err.message);
     return null;
   }
 }
@@ -275,11 +438,15 @@ export async function fetchStats(): Promise<BackendStats | null> {
   const statsUrl = `${API_BASE_URL}/api/stats`;
   console.log(`[FireSync API Fetch] Fetching statistics: ${statsUrl}`);
   try {
-    const res = await fetch(statsUrl, { cache: 'no-store' });
+    const res = await fetchWithTimeout(
+      statsUrl,
+      { cache: 'no-store' },
+      DEFAULT_FETCH_TIMEOUT_MS
+    );
     if (!res.ok) return null;
     return res.json();
-  } catch (err) {
-    console.error(`[FastAPI Stats Check Failed]`, err);
+  } catch (err: any) {
+    console.error(`[FastAPI Stats Check Failed]`, err.message);
     return null;
   }
 }

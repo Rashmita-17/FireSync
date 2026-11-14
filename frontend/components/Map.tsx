@@ -303,6 +303,9 @@ export default function DisasterMap({
   showSubPixels,
   showNoisePoints,
 }: MapProps) {
+  const safeClusters = Array.isArray(clusters) ? clusters.filter(Boolean) : [];
+  const safeNoisePoints = Array.isArray(noisePoints) ? noisePoints.filter(Boolean) : [];
+
   const isSubPixelsVisible = showSubPixels !== undefined ? showSubPixels : showRawObservations;
   const isPerimetersVisible = showPerimeters;
   const isNoiseVisible = showNoisePoints;
@@ -620,7 +623,7 @@ export default function DisasterMap({
         return;
       }
 
-      const perimeterFeatures: GeoJSON.Feature[] = clusters.map((cluster) => {
+      const perimeterFeatures: GeoJSON.Feature[] = safeClusters.map((cluster) => {
         const isSelected = selectedClusterId === cluster.cluster_id;
         const frpColor = getFrpColor(cluster.total_frp);
 
@@ -684,7 +687,7 @@ export default function DisasterMap({
         map.off('style.load', renderPerimeters);
       };
     }
-  }, [clusters, selectedClusterId, isPerimetersVisible, styleEpoch]);
+  }, [safeClusters, selectedClusterId, isPerimetersVisible, styleEpoch]);
 
   // Click & hover interactions on perimeters
   useEffect(() => {
@@ -696,7 +699,7 @@ export default function DisasterMap({
       const feature = e.features?.[0];
       if (feature?.properties?.cluster_id !== undefined) {
         const clusterId = Number(feature.properties.cluster_id);
-        const found = clusters.find((c) => c.cluster_id === clusterId);
+        const found = safeClusters.find((c) => c.cluster_id === clusterId);
         if (found) {
           onSelectCluster(found);
         }
@@ -726,7 +729,7 @@ export default function DisasterMap({
         map.off('mouseleave', 'perimeters-fill', onPerimeterLeave);
       }
     };
-  }, [clusters, onSelectCluster, styleEpoch, isPerimetersVisible]);
+  }, [safeClusters, onSelectCluster, styleEpoch, isPerimetersVisible]);
 
   // 5. Cluster Tactical FRP Beacon Markers with Popups
   useEffect(() => {
@@ -737,7 +740,7 @@ export default function DisasterMap({
     markersRef.current.forEach((m) => m.remove());
     markersRef.current = [];
 
-    clusters.forEach((cluster) => {
+    safeClusters.forEach((cluster) => {
       const isSelected = selectedClusterId === cluster.cluster_id;
       const frpColor = getFrpColor(cluster.total_frp);
       const size = Math.min(46, Math.max(26, Math.round(Math.sqrt(cluster.total_frp) * 2.2)));
@@ -828,7 +831,7 @@ export default function DisasterMap({
 
       markersRef.current.push(marker);
     });
-  }, [clusters, selectedClusterId, onSelectCluster, styleEpoch]);
+  }, [safeClusters, selectedClusterId, onSelectCluster, styleEpoch]);
 
   // 6. Defensive Raw Observations (MODIS vs VIIRS sub-pixels) Layer
   useEffect(() => {
@@ -845,7 +848,7 @@ export default function DisasterMap({
       }
 
       const obsFeatures: GeoJSON.Feature[] = [];
-      clusters.forEach((cluster) => {
+      safeClusters.forEach((cluster) => {
         const observations =
           cluster.observations && cluster.observations.length > 0
             ? cluster.observations
@@ -925,7 +928,7 @@ export default function DisasterMap({
         map.off('style.load', renderRawObs);
       };
     }
-  }, [clusters, isSubPixelsVisible, styleEpoch]);
+  }, [safeClusters, isSubPixelsVisible, styleEpoch]);
 
   // 7. Defensive Noise Points (Isolated Singletons / Solar Glints) Layer
   useEffect(() => {
@@ -935,13 +938,13 @@ export default function DisasterMap({
     const renderNoise = () => {
       if (!map.isStyleLoaded()) return;
 
-      if (!isNoiseVisible || !noisePoints.length) {
+      if (!isNoiseVisible || !safeNoisePoints.length) {
         safeRemoveLayer(map, 'noise-points-circle');
         safeRemoveSource(map, 'noise-points-source');
         return;
       }
 
-      const noiseFeatures: GeoJSON.Feature[] = noisePoints.map((obs) => ({
+      const noiseFeatures: GeoJSON.Feature[] = safeNoisePoints.map((obs) => ({
         type: 'Feature',
         geometry: {
           type: 'Point',
@@ -981,7 +984,7 @@ export default function DisasterMap({
         map.off('style.load', renderNoise);
       };
     }
-  }, [noisePoints, isNoiseVisible, styleEpoch]);
+  }, [safeNoisePoints, isNoiseVisible, styleEpoch]);
 
   // Tooltips for sub-pixels and noise points with strict layer existence guards
   useEffect(() => {
@@ -1456,7 +1459,7 @@ export default function DisasterMap({
           <div className="flex items-center gap-1.5">
             <Flame className="w-3.5 h-3.5 text-rose-500 animate-pulse" />
             <span className="text-slate-300">
-              Harmonized: <strong className="text-white font-mono">{clusters.length}</strong>
+              Harmonized: <strong className="text-white font-mono">{safeClusters.length}</strong>
             </span>
           </div>
           <div className="h-3 w-px bg-slate-800" />
@@ -1465,7 +1468,7 @@ export default function DisasterMap({
             <span className="text-slate-300">
               Cross-Validated:{' '}
               <strong className="text-emerald-400 font-mono">
-                {clusters.filter((c) => c.cross_validated).length}
+                {safeClusters.filter((c) => Boolean(c.cross_validated)).length}
               </strong>
             </span>
           </div>

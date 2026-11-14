@@ -67,9 +67,25 @@ export default function DisasterResponseDashboard() {
         };
 
         const result = await fetchHarmonizedData(queryParams);
-        setClusters([...(result.clusters || [])]);
-        setSummary(result.summary ? { ...result.summary } : null);
-        setNoisePoints([...(result.noise_points || [])]);
+        const safeClusters = Array.isArray(result?.clusters) ? result.clusters : [];
+        setClusters([...safeClusters]);
+        setSummary(
+          result?.summary
+            ? { ...result.summary }
+            : {
+                total_observations: 0,
+                total_clusters: safeClusters.length,
+                total_noise_points: 0,
+                modis_detections: 0,
+                viirs_detections: 0,
+                cross_validated_clusters: 0,
+                cross_validation_rate: 0,
+                total_harmonized_frp_mw: 0,
+                spatial_compression_ratio: 1.0,
+                execution_time_ms: 0,
+              }
+        );
+        setNoisePoints(Array.isArray(result?.noise_points) ? [...result.noise_points] : []);
       } catch (err: any) {
         console.error('[Dashboard Error] Failed to harmonize AOI bounding box:', {
           error: err,
@@ -77,6 +93,21 @@ export default function DisasterResponseDashboard() {
           stack: err.stack,
           bbox,
         });
+        // Gracefully render 0 active complexes without crashing or hanging
+        setClusters([]);
+        setSummary({
+          total_observations: 0,
+          total_clusters: 0,
+          total_noise_points: 0,
+          modis_detections: 0,
+          viirs_detections: 0,
+          cross_validated_clusters: 0,
+          cross_validation_rate: 0,
+          total_harmonized_frp_mw: 0,
+          spatial_compression_ratio: 1.0,
+          execution_time_ms: 0,
+        });
+        setNoisePoints([]);
         setErrorNotice(err.message || 'Failed to connect to FastAPI /api/harmonize endpoint');
       } finally {
         setLoading(false);
@@ -112,8 +143,16 @@ export default function DisasterResponseDashboard() {
   useEffect(() => {
     const checkHealth = async () => {
       const health = await fetchHealthStatus();
-      setBackendHealthy(health.status === 'healthy');
-      setTotalDbRecords(health.records);
+      // Permissive: Any HTTP 200 / ok sets backend status to ONLINE
+      setBackendHealthy(
+        Boolean(
+          health.ok ||
+          health.status === 'online' ||
+          health.status === 'healthy' ||
+          health.status === 'empty_database'
+        )
+      );
+      setTotalDbRecords(health.records || 0);
     };
 
     checkHealth();

@@ -29,24 +29,27 @@ export default function TelemetryPanel({
   onSelectCluster,
   loading,
 }: TelemetryPanelProps) {
+  // Defensive normalization so undefined, null, or non-array props never crash
+  const safeClusters = Array.isArray(clusters) ? clusters.filter(Boolean) : [];
+
   // Derive active live metrics from summary or calculated directly from cluster collection
-  const totalHarmonizedEvents = summary?.total_clusters ?? clusters.length;
+  const totalHarmonizedEvents = summary?.total_clusters ?? safeClusters.length;
   const totalDetections =
     summary?.total_observations ??
-    clusters.reduce((acc, c) => acc + c.total_detections, 0);
+    safeClusters.reduce((acc, c) => acc + (Number(c.total_detections) || 0), 0);
   const crossValidatedCount =
     summary?.cross_validated_clusters ??
-    clusters.filter((c) => c.cross_validated).length;
+    safeClusters.filter((c) => Boolean(c.cross_validated)).length;
   const crossValRate =
     summary?.cross_validation_rate !== undefined
       ? (summary.cross_validation_rate * 100).toFixed(0)
-      : clusters.length > 0
-        ? ((crossValidatedCount / clusters.length) * 100).toFixed(0)
+      : safeClusters.length > 0
+        ? ((crossValidatedCount / safeClusters.length) * 100).toFixed(0)
         : '0';
   const totalEnergy =
     summary?.total_harmonized_frp_mw !== undefined
       ? summary.total_harmonized_frp_mw
-      : clusters.reduce((acc, c) => acc + c.total_frp, 0);
+      : safeClusters.reduce((acc, c) => acc + (Number(c.total_frp) || 0), 0);
   const compressionRatio =
     summary?.spatial_compression_ratio !== undefined
       ? summary.spatial_compression_ratio
@@ -167,7 +170,7 @@ export default function TelemetryPanel({
             <div className="w-6 h-6 border-2 border-rose-500/30 border-t-rose-500 rounded-full animate-spin" />
             <div className="text-xs font-mono">CALCULATING SPATIO-TEMPORAL DENSITY...</div>
           </div>
-        ) : clusters.length === 0 ? (
+        ) : safeClusters.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 text-center text-slate-500 gap-2 px-4">
             <Flame className="w-8 h-8 opacity-20 text-rose-500" />
             <div className="text-xs font-semibold text-slate-400">No active fire events in AOI</div>
@@ -176,7 +179,7 @@ export default function TelemetryPanel({
             </div>
           </div>
         ) : (
-          clusters.map((cluster) => {
+          safeClusters.map((cluster) => {
             const isSelected = selectedClusterId === cluster.cluster_id;
 
             return (

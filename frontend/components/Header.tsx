@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Satellite, Flame, Clock, ExternalLink, Map, Calendar } from 'lucide-react';
+import { API_BASE_URL } from '@/utils/api';
 
 interface HeaderProps {
   backendHealthy: boolean;
@@ -125,7 +126,7 @@ export default function Header({
         </div>
 
         <a
-          href="http://localhost:8000/docs"
+          href={`${API_BASE_URL}/docs`}
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center gap-1 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded border border-slate-700 text-xs transition font-medium"
